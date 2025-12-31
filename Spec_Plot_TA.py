@@ -1,4 +1,4 @@
-# Latest update: 2025-12-17
+# Latest update: 2025-12-31
 
 import os
 import re
@@ -9,7 +9,7 @@ import scipy
 from matplotlib import pyplot as pp
 from scipy.optimize import curve_fit
 
-INPUT_JSON_PATH = 'ZZL-283/config_E00_ddFppy_2.json'
+INPUT_JSON_PATH = 'ZZL-298/config_KA_330nm_ene_1us.json'
 
 #========== Common Notes ===========
 # Supported TYPE:
@@ -41,11 +41,13 @@ INPUT_JSON_PATH = 'ZZL-283/config_E00_ddFppy_2.json'
 # "exp_decay": t, y0, A, tau; y = y0 + A * exp(-t / tau)
 # "exp_2decay": t, y0, A1, A2, tau1, tau2; y = y0 + A1 * exp(-t / tau1) + A2 * exp(-t / tau2) 
 # "secondary_decay" t, y0, k, r0; y = y0 + 1 / (2 * k * t + r0)
-# "primary_secondary_decay" t, y0, k1, k2, const, eps; y = y0 + eps * k1 / (exp(k1 * (t - const)) - 2 * k2)
-# "primary_secondary_decay_eps1" t, y0, k1, k2, const; y = y0 + k1 / (exp(k1 * (t - const)) - 2 * k2)
-# "primary_secondary_decay_efix" t, y0, k1, k2, const; eps = efix
+# "primary_secondary_decay" t, y0, k1, k2, const, eps; y = y0 + k1 / (exp(k1 * (t - const)) - 2 * k2)
+# "primary_rise": t, y0, A, k; y = y0 + A * (1 - exp(-k * t))
+# "primary_rise_linear_offset": t, y0, A, k, B; y = y0 + A * (1 - exp(-k * t)) + B * t
+# "double_primary_rise": t, y0, A1, k1, A2, k2; y = y0 + A1 * (1 - exp(-k1 * t)) + A2 * (1 - exp(-k2 * t))
+# "double_primary_rise_linear_offset": t, y0, A1, k1, A2, k2, B; y = y0 + A1 * (1 - exp(-k1 * t)) + A2 * (1 - exp(-k2 * t)) + B * t
 
-# Note: In initial guess of primary_secondary_decay, const = - ln(eps* k1 / r0 + 2*k2) / k1, 
+# Note: In initial guess of primary_secondary_decay, const = - ln(k1 / r0 + 2*k2) / k1, 
 # The input const is r0 (~0.05, the maximum of KA spectrum) actually.
 
 #region --- Load configuration from JSON ---
@@ -61,23 +63,30 @@ LABEL_LIST = config.get("LABEL_LIST", [])
 BLANK = config.get("BLANK", [])
 COLOR_LIST = config.get("COLOR_LIST", [])
 TITLE0 = config.get("TITLE0", "")
+TITLE_FONTSIZE = config.get("TITLE_FONTSIZE", 18)
+LINEWIDTH = config.get("LINEWIDTH", 1.5)
 WAVELENGTH_DETECTED = config.get("WAVELENGTH_DETECTED", 0)
 LENGTH = config.get("LENGTH", 1.0)
 FIGSIZE = tuple(config.get("FIGSIZE", [10, 6])) # Convert list to tuple for matplotlib
 ENABLE_LEGEND = config.get("ENABLE_LEGEND", True)
 SHOW_RUN_NUMBER = config.get("SHOW_RUN_NUMBER", False)
 XLABEL = config.get("XLABEL", "Wavelength (nm)")
-xmin = config.get("XMIN", 0.0) # Allows for None if not in JSON
+
+xmin = config.get("XMIN", 0.0)
 xmax = config.get("XMAX", 0.0)
-ymin = config.get("ymin", 0.0)
-ymax = config.get("ymax", 0.0)
+ymin = config.get("YMIN", 0.0)
+ymax = config.get("YMAX", 0.0)
+YMAX_OF_RESIDUAL = config.get("YMAX_OF_RESIDUAL", 0.0)
 X_CORR = config.get("X_CORR", 0.0) # X-axis correction value.
 # When solving kinetic data, this value can reset time-zero point. Resolve after x_scale.
 Y_CORR = config.get("Y_CORR", 0.0) # Y-axis correction value.
-x_scale = config.get("x_scale", 1.0)
-y_scale = config.get("y_scale", 1.0)
+x_scale = config.get("X_SCALE", 1.0)
+y_scale = config.get("Y_SCALE", 1.0)
 Y_SCALE_FACTOR_IN_UNIT = config.get("Y_SCALE_FACTOR_IN_UNIT", 1.0)
 SCALE_FACTOR_FLUORE = config.get("SCALE_FACTOR_FLUORE", 1e-4)
+X_CUT_AFTER = config.get("X_CUT_AFTER", None)
+# Cut data after this x value (for kinetic data fitting)
+
 FIND_INTERSECTIONS = config.get("FIND_INTERSECTIONS", False)
 SHOW_INTERSECTIONS = config.get("SHOW_INTERSECTIONS", False)
 INTERSECTIONS_ABS_TOL = config.get("INTERSECTION_ABS_TOL", 5e-2)
@@ -93,102 +102,23 @@ RETRY_FIT_IF_FAIL = config.get("RETRY_FIT_IF_FAIL", True)
 WEIGHTING_FOR_FIT = config.get("WEIGHTING_FOR_FIT", False)
 WEIGHTING_AFTER = config.get("WEIGHTING_AFTER", 0.0) # us
 WEIGHT = config.get("WEIGHT", 0.2)
-CUSTOM_EFIX = config.get("CUSTOM_EFIX", 0.0)
+
+TO_FIND_TIME_ZERO = config.get("TO_FIND_TIME_ZERO", False) # Whether to find time-zero point in kinetic absorption data
+
+# Other parameters:
+# COLORMAP_REVERSED: bool, whether to reverse the colormap when COLOR_LIST is a colormap name.
 
 #endregion --- End of Configuration Loading ---
 
 #region --- Redefining ---------------
 
-if CUSTOM_EFIX:
-    efix = CUSTOM_EFIX
-    found_efix = True
-else:
-    efix = 1.0
-    found_efix = False
-
 name_reserved = ''
-TO_FIND_TIME_ZERO = False # Whether to find time-zero point in kinetic absorption data
 
-if xmin and xmax and (not TO_FIND_TIME_ZERO):
+if xmin or xmax and X_CORR and (not TO_FIND_TIME_ZERO):
     xmin += X_CORR
     xmax += X_CORR
 
 #endregion -- End of Redefining ---------------
-
-#region ---- Mode recognition ---------------------
-# Determine plot mode and choose type_title / ylabel
-# For normal UV-Vis/Fluorescence/TA plotting, plot_mode = 0
-# For kinetic absorption fitting, plot_mode = 1
-#
-plot_mode = 0
-type_title = '' # Needless to set, it will be set automatically based on TYPE
-ylabel = 'Arbitrary unit'
-
-if TYPE == "TA":
-    type_title = 'TA'
-    ylabel = '∆OD (a. u.)'
-if TYPE == "UV" or TYPE == "UV-Vis":
-    type_title = 'UV-Vis'
-    ylabel = 'Absorbance (A)'
-    if NORMALIZATION_METHOD == 1:
-        ylabel = 'ε (L·mol$^{-1}$·cm$^{-1}$)'
-if TYPE == "FL" or TYPE == "E00":
-    type_title = 'Fluorescence'
-    ylabel = 'Counts'
-if TYPE == "EX":
-    type_title = 'Fluorescence excitation'
-    ylabel = 'Counts'
-if TYPE == "EM":
-    type_title = 'Fluorescence emission'
-    ylabel = 'Counts'
-if TYPE == "KinAbs" and not DO_FITTING:
-    type_title = 'Absorption kinetics'
-    ylabel = '∆OD (a. u.)'
-
-if NORMALIZATION_METHOD == 2:
-    if TYPE == 'E00' or TYPE == 'FL' or TYPE == 'EX' or TYPE == 'EM':
-        ylabel = 'Normalized fluorescence intensity'
-    elif TYPE == 'UV' or TYPE == 'UV-Vis':
-        ylabel = 'Normalized absorbance'
-    else:
-        ylabel = 'Normalized unit'
-
-if TYPE == "KinAbs" and DO_FITTING:
-    type_title = 'Absorption kinetics'
-    ylabel = '∆OD (a. u.)'
-    plot_mode = 1
-
-#endregion ---- End of mode recognition ---------------------
-
-#region --- Plotting preprocessing ---------------
-
-if plot_mode == 0:
-    pp.figure(figsize=FIGSIZE)
-elif plot_mode == 1:
-    # Create a figure with two subplots stacked vertically
-    fig, (ax1, ax2) = pp.subplots(
-        2, 1, 
-        figsize=FIGSIZE, 
-        sharex=True,  # Both subplots will share the same x-axis
-        gridspec_kw={'height_ratios': [3, 1]} # Main plot is 3x taller than residual plot
-    )
-    fig.subplots_adjust(hspace=0.05) # Remove space between plots
-
-pp.rcParams['font.family'] = 'sans-serif'
-pp.rcParams['font.sans-serif'] = ['Arial']
-pp.rcParams['font.size'] = 16
-
-label_list = []
-if not AUTOLABEL:
-    label_list = LABEL_LIST # Get labels
-else:
-    label_list = [f'Run{r:02d}' for r in RUN_LIST]
-
-if SHOW_RUN_NUMBER:
-    for i in range(len(label_list)):
-        label_list[i] += f' (Run{RUN_LIST[i]:02d})'
-
-#endregion --- Plotting preprocessing ---------------
 
 #region --- Defining parsing functions ---------------
 
@@ -237,6 +167,37 @@ def extract_data(num, directory = RUN_DIR, return_meta = False, type_adjust = ''
     else:
         return np.array(data)
 
+# Determine human-readable time unit based on x_scale (input data in ns)
+def infer_time_unit(scale):
+    mapping = {1.0: 'ns', 1e-3: 'μs', 1e-6: 'ms', 1e-9: 's'}
+    # exact match (within tol)
+    for k, v in mapping.items():
+        if math.isclose(scale, k, rel_tol=1e-9, abs_tol=1e-12):
+            return v
+    # fallback: choose the nearest by log10 distance
+    try:
+        closest = min(mapping.keys(), key=lambda k: abs(math.log10(scale) - math.log10(k)))
+        return mapping[closest]
+    except Exception:
+        return 'ns'
+
+# Parse order(int) to unit string
+# Order: 0 - No unit; 1 - time unit; -1 - time unit inverse; -2 - secondary (μs^-1·a.u.^-1); 10 a.u.
+def parse_order_to_unit(order, scale = x_scale, levelup = 0):
+    time_unit = infer_time_unit(scale * (10 ** ( - levelup * 3)))
+    if order == 0:
+        return ""
+    elif order == 1:
+        return f"{time_unit}"
+    elif order == 2:
+        return f"{time_unit}²"
+    elif order == -1:
+        return f"/{time_unit}"
+    elif order == -2:
+        return f"/({time_unit}·a.u.)"
+    elif order == 10:
+        return f"a.u."
+
 #endregion --- End of Parsing functions ---------------
 
 #region --- Functions to fit ---------------
@@ -266,35 +227,66 @@ def secondary_decay(t, y0, k, r0):
     """
     return y0 + 1 / (k * t + r0)
 
-def primary_secondary_decay(t, y0, k1, k2, const, eps):
-    return y0 + k1 / (np.exp(k1 * (t - const)) - 2 * k2) * eps
-
-def primary_secondary_decay_eps1(t, y0, k1, k2, const):
+def primary_secondary_decay(t, y0, k1, k2, const):
     return y0 + k1 / (np.exp(k1 * (t - const)) - 2 * k2)
 
-def primary_secondary_decay_efix(t, y0, k1, k2, const):
-    return y0 + k1 / (np.exp(k1 * (t - const)) - 2 * k2) * efix
+def primary_rise(t, y0, A, k):
+    """
+    Primary rise function.
+    y(t) = y0 + A * (1 - exp(-k * t))
+    y0: offset
+    A: amplitude
+    k: rise rate constant
+    """
+    return y0 + A * (1 - np.exp(-k * t))
 
-def calculate_r_squared(y_true, y_predicted):
-    """Calculates the R-squared value."""
-    residuals = y_true - y_predicted
-    ss_res = np.sum(residuals**2)
-    ss_tot = np.sum((y_true - np.mean(y_true))**2)
-    r_squared = 1 - (ss_res / ss_tot)
-    return r_squared
+def primary_rise_linear_offset(t, y0, A, k, B):
+    """
+    Primary rise function with linear offset.
+    y(t) = y0 + A * (1 - exp(-k * t)) + B * t
+    y0: offset
+    A: amplitude
+    k: rise rate constant
+    B: linear offset coefficient
+    """
+    return y0 + A * (1 - np.exp(-k * t)) + B * t
+
+def double_primary_rise(t, y0, A1, k1, A2, k2):
+    """
+    Double primary rise function.
+    y(t) = y0 + A1 * (1 - exp(-k1 * t)) + A2 * (1 - exp(-k2 * t))
+    y0: offset
+    A1, A2: amplitudes
+    k1, k2: rise rate constants
+    """
+    return y0 + A1 * (1 - np.exp(-k1 * t)) + A2 * (1 - np.exp(-k2 * t))
+
+def double_primary_rise_linear_offset(t, y0, A1, k1, A2, k2, B):
+    """
+    Double primary rise function with linear offset.
+    y(t) = y0 + A1 * (1 - exp(-k1 * t)) + A2 * (1 - exp(-k2 * t)) + B * t
+    y0: offset
+    A1, A2: amplitudes
+    k1, k2: rise rate constants
+    B: linear offset coefficient
+    """
+    return y0 + A1 * (1 - np.exp(-k1 * t)) + A2 * (1 - np.exp(-k2 * t)) + B * t
 
 FIT_MODELS = {
     "exp_decay": exp_decay,
+    "primary_decay": exp_decay,
     "exp_2decay": exp_2decay,
     "secondary_decay": secondary_decay,
     "primary_secondary_decay": primary_secondary_decay,
-    "primary_secondary_decay_eps1": primary_secondary_decay_eps1,
-    "primary_secondary_decay_efix": primary_secondary_decay_efix
+    "primary_rise": primary_rise,
+    "primary_rise_linear_offset": primary_rise_linear_offset,
+    "double_primary_rise": double_primary_rise,
+    "double_primary_rise_linear_offset": double_primary_rise_linear_offset
 }
 
 #endregion --- End of Functions to fit ---------------
 
-#region --- Intersection function ---------------
+#region --- Other functions ---------------
 def find_curve_intersections(x1, y1, x2, y2, xtol=1e-8, abs_tol=4e-2):
     """
     Return a list of (x, y) intersection points between two 1D curves.
@@ -359,11 +351,126 @@ def find_curve_intersections(x1, y1, x2, y2, xtol=1e-8, abs_tol=4e-2):
             merged.append((x,y))
     return merged
 
-#endregion --- End of intersection function ---------------
+def calculate_r_squared(y_true, y_predicted):
+    """Calculates the R-squared value."""
+    residuals = y_true - y_predicted
+    ss_res = np.sum(residuals**2)
+    ss_tot = np.sum((y_true - np.mean(y_true))**2)
+    r_squared = 1 - (ss_res / ss_tot)
+    return r_squared
+
+#endregion --- End of Other functions ---------------
+
+#region ---- Mode recognition ---------------------
+# Determine plot mode and choose type_title / ylabel
+# For normal UV-Vis/Fluorescence/TA plotting, plot_mode = 0
+# For kinetic absorption fitting, plot_mode = 1
+
+plot_mode = 0
+type_title = '' # Needless to set, it will be set automatically based on TYPE
+ylabel = 'Arbitrary unit'
+
+if TYPE == "TA":
+    type_title = 'TA'
+    ylabel = '∆OD (a. u.)'
+if TYPE == "UV" or TYPE == "UV-Vis":
+    type_title = 'UV-Vis'
+    ylabel = 'Absorbance (A)'
+    if NORMALIZATION_METHOD == 1:
+        ylabel = 'ε (L·mol$^{-1}$·cm$^{-1}$)'
+if TYPE == "FL" or TYPE == "E00":
+    type_title = 'Fluorescence'
+    ylabel = 'Counts'
+if TYPE == "EX":
+    type_title = 'Fluorescence excitation'
+    ylabel = 'Counts'
+if TYPE == "EM":
+    type_title = 'Fluorescence emission'
+    ylabel = 'Counts'
+if TYPE == "KinAbs" and not DO_FITTING:
+    type_title = 'Absorption kinetics'
+    ylabel = '∆OD (a. u.)'
+
+if NORMALIZATION_METHOD == 2:
+    if TYPE == 'E00' or TYPE == 'FL' or TYPE == 'EX' or TYPE == 'EM':
+        ylabel = 'Normalized fluorescence intensity'
+    elif TYPE == 'UV' or TYPE == 'UV-Vis':
+        ylabel = 'Normalized absorbance'
+    else:
+        ylabel = 'Normalized unit'
+
+if TYPE == "KinAbs" and DO_FITTING:
+    type_title = 'Absorption kinetics'
+    XLABEL = f'Time ({infer_time_unit(x_scale)})'
+    ylabel = '∆OD (a. u.)'
+    plot_mode = 1
+
+#endregion ---- End of mode recognition ---------------------
+
+#region --- Plotting preprocessing ---------------
+
+if plot_mode == 0:
+    pp.figure(figsize=FIGSIZE)
+elif plot_mode == 1:
+    # Create a figure with two subplots stacked vertically
+    fig, (ax1, ax2) = pp.subplots(
+        2, 1, 
+        figsize=FIGSIZE, 
+        sharex=True,  # Both subplots will share the same x-axis
+        gridspec_kw={'height_ratios': [3, 1]} # Main plot is 3x taller than residual plot
+    )
+    fig.subplots_adjust(hspace=0.05) # Remove space between plots
+    if not XLABEL:
+        XLABEL = f'Time ({infer_time_unit(x_scale)})'
+
+pp.rcParams['font.family'] = 'sans-serif'
+pp.rcParams['font.sans-serif'] = ['Arial']
+pp.rcParams['font.size'] = 16
+
+label_list = []
+if not AUTOLABEL:
+    label_list = LABEL_LIST # Get labels
+else:
+    label_list = [f'Run{r:02d}' for r in RUN_LIST]
+
+if SHOW_RUN_NUMBER:
+    for i in range(len(label_list)):
+        label_list[i] += f' (Run{RUN_LIST[i]:02d})'
+
+# Set up color list if input COLOR_LIST is a string (colormap name)
+if type(COLOR_LIST) == str:
+    ncolors = max(1, len(RUN_LIST))
+    cmap_name = config.get("COLOR_LIST", "viridis")
+    try:
+        cmap = pp.get_cmap(cmap_name)
+    except ValueError:
+        print(f'!Warning: Colormap name "{cmap_name}" is invalid. Using "viridis" instead.')
+        cmap = pp.get_cmap("viridis")
+    if ncolors == 1:
+        COLOR_LIST = [cmap(0.5)]
+    else:
+        COLOR_LIST = [cmap(i / (ncolors - 1)) for i in range(ncolors)]
+    if config.get("COLORMAP_REVERSED", False):
+        COLOR_LIST = COLOR_LIST[::-1]
+
+# If the CONCENTRATION_LIST length is less than RUN_LIST, extend it by repeating the last value
+if len(CONCENTRATION_LIST) < len(RUN_LIST):
+    while len(CONCENTRATION_LIST) < len(RUN_LIST):
+        CONCENTRATION_LIST.append(CONCENTRATION_LIST[-1])
+    print('!Warning: CONCENTRATION_LIST length is less than RUN_LIST length. Extended by repeating last value.')
+
+#endregion --- Plotting preprocessing ---------------
 
 #region ---- TA spectrum plotting ---------------------
 
 if plot_mode == 0:
+    if xmin or xmax:
+        ##pp.xlim(xmin, xmax)
+        pp.xlim(left=xmin, right=xmax)
+    if ymin or ymax:
+        ##pp.ylim(ymin, ymax)
+        pp.ylim(bottom=ymin, top=ymax)
+
     data_arrays = [extract_data(num) for num in RUN_LIST]
     for i, data in enumerate(data_arrays):
         # Data normalization ============================
@@ -379,15 +486,20 @@ if plot_mode == 0:
         # Data pre-processing ============================
         data[:,0] = data[:,0] * x_scale + X_CORR
         data[:,1] = data[:,1] * y_scale + Y_CORR
+        if X_CUT_AFTER is not None:
+            data = data[data[:,0] <= X_CUT_AFTER]
+        ##ymaximum = max(ymaximum, np.max(data[:,1]))
+        
+        # Plotting ============================
         if not True: # If you want to use a blank data set, set this to True
-            pp.plot(data[:,0], data[:,1], label = label_list[i], color = '#b0b0b0')
+            pp.plot(data[:,0], data[:,1], label = label_list[i], color = '#b0b0b0', linewidth=LINEWIDTH)
         else:
             if COLOR_LIST and label_list:
-                pp.plot(data[:,0], data[:,1], label = label_list[i], color = COLOR_LIST[i % len(COLOR_LIST)])
+                pp.plot(data[:,0], data[:,1], label = label_list[i], color = COLOR_LIST[i % len(COLOR_LIST)], linewidth=LINEWIDTH)
             elif label_list:
-                pp.plot(data[:,0], data[:,1], label = label_list[i])
+                pp.plot(data[:,0], data[:,1], label = label_list[i], linewidth=LINEWIDTH)
             else:
-                pp.plot(data[:,0], data[:,1])
+                pp.plot(data[:,0], data[:,1], linewidth=LINEWIDTH)
 
     # If there are at least two curves, compute their intersections and mark them
     if FIND_INTERSECTIONS and len(data_arrays) >= 2:
@@ -415,8 +527,13 @@ elif plot_mode == 1:
     if RUN_LIST:
         #region --- Data extraction and pre-processing for fitting ---
         data = extract_data(RUN_LIST[0])
-        time_data = data[:,0] * x_scale + X_CORR
-        intensity_data = data[:,1] * y_scale
+        data[:,0] = data[:,0] * x_scale + X_CORR
+        data[:,1] = data[:,1] * y_scale + Y_CORR
+        if X_CUT_AFTER is not None:
+            data = data[data[:,0] <= X_CUT_AFTER]
+        
+        time_data = data[:,0]
+        intensity_data = data[:,1]
 
         # This finds the index of the time value closest to zero
         zero_index = np.argmin(np.abs(time_data))
@@ -493,15 +610,37 @@ elif plot_mode == 1:
                         intensity_data[-1], # y0
                         (intensity_data[zero_index] - intensity_data[-1]) * 0.5,               # k1
                         1.0,              # k2
-                        0.05,                # const
-                        1000.0                 # eps
-                    ]
-                elif fit_function == primary_secondary_decay_eps1 or fit_function == primary_secondary_decay_efix:
-                    initial_guess = [
-                        intensity_data[-1], # y0
-                        (intensity_data[zero_index] - intensity_data[-1]) * 0.5,               # k1
-                        1.0,              # k2
                         0.05                # const
+                    ]
+                elif fit_function == primary_rise:
+                    initial_guess = [
+                        intensity_data[zero_index], # y0
+                        intensity_data[-1] - intensity_data[zero_index], # A
+                        2 / (time_data[-1] - time_data[zero_index]) # k
+                    ]
+                elif fit_function == primary_rise_linear_offset:
+                    initial_guess = [
+                        intensity_data[zero_index], # y0
+                        intensity_data[-1] - intensity_data[zero_index], # A
+                        2 / (time_data[-1] - time_data[zero_index]), # k
+                        0.0 # B
+                    ]
+                elif fit_function == double_primary_rise:
+                    initial_guess = [
+                        intensity_data[zero_index], # y0
+                        intensity_data[-1] - intensity_data[zero_index], # A1
+                        2 / (time_data[-1] - time_data[zero_index]), # k1
+                        (intensity_data[-1] - intensity_data[zero_index]) * 0.5, # A2
+                        1 / (time_data[-1] - time_data[zero_index]) # k2
+                    ]
+                elif fit_function == double_primary_rise_linear_offset:
+                    initial_guess = [
+                        intensity_data[zero_index], # y0
+                        intensity_data[-1] - intensity_data[zero_index], # A1
+                        2 / (time_data[-1] - time_data[zero_index]), # k1
+                        (intensity_data[-1] - intensity_data[zero_index]) * 0.5, # A2
+                        1 / (time_data[-1] - time_data[zero_index]), # k2
+                        0.0 # B
                     ]
                 else:
                     print("Error: Unknown fitting function. Cannot perform fitting.")
@@ -511,11 +650,10 @@ elif plot_mode == 1:
                 #region --- Override initial guess if custom guess is enabled ---
                 if ENABLE_CUSTOM_INITIAL_GUESS and CUSTOM_INITIAL_GUESS:
                     initial_guess = CUSTOM_INITIAL_GUESS
-                    # 以下部分专为一二级混合衰减设计，促进收敛
-                    if fit_function == primary_secondary_decay:
-                        initial_guess[3] = - np.log(initial_guess[4] * initial_guess[1] / initial_guess[3] + 2*initial_guess[2]) / initial_guess[1]
-                    elif fit_function == primary_secondary_decay_eps1 or fit_function == primary_secondary_decay_efix:
-                        initial_guess[3] = - np.log(efix * initial_guess[1] / initial_guess[3] + 2*initial_guess[2]) / initial_guess[1]
+                
+                # 以下部分专为一二级混合衰减设计，促进收敛
+                if fit_function == primary_secondary_decay:
+                    initial_guess[3] = - np.log(initial_guess[1] / initial_guess[3] + 2*initial_guess[2]) / initial_guess[1]
                 
                 initial_guess[0] = (initial_guess[0] - baseline) / scale # Convert y0 to normalized units 
                 #endregion
@@ -551,43 +689,86 @@ elif plot_mode == 1:
                 #endregion
                 
                 #region --- Print the fitted results ---
+
                 print(f"Fit successful for Run {RUN_LIST[0]:02d}:")
+
+                time_unit = infer_time_unit(x_scale)
+                time_unit_upper = infer_time_unit(x_scale * 1e-3)
+
+                # Scale up time-related parameters if they are very small
+                idx_to_scale_up = []
+                for i, x in enumerate(popt):
+                    if abs(x) < 1e-3:
+                        popt[i] = x * 1e3
+                        idx_to_scale_up.append(i)
+
+                info_list = [] # [Symbol_string, order, other_info_string]
+                info_sequence = [] # Determine the order of displaying info
                 info_lines = [f'Func: \"{FIT_FUNCTION}\"', 
                             f'$R^2$ = {R2:.4f}',]
+                info_text = ''
+                
+                # Determine info_list and info_sequence based on fit_function
                 if fit_function == exp_decay:
-                    info_lines.append(f"$τ$ = {popt[2]:.4f} μs")
-                    info_lines.append(f"$A$ = {popt[1]:.4f}")
-                    info_lines.append(f"$y_0$ = {popt[0]:.4f}")
+                    info_list = [["$y_0$",0,  ""],
+                                 ["$A$",0,  ""],
+                                 ["$τ$",1,  ""]]
+                    info_sequence = [2, 1, 0]
                 elif fit_function == exp_2decay:
-                    info_lines.append(f"$τ_1$ = {popt[3]:.4f} μs ({abs(popt[1])*100/(abs(popt[1])+abs(popt[2])):.1f}%)")
-                    info_lines.append(f"$τ_2$ = {popt[4]:.4f} μs ({abs(popt[2])*100/(abs(popt[1])+abs(popt[2])):.1f}%)")
-                    info_lines.append(f"$A_1$ = {popt[1]:.4f}")
-                    info_lines.append(f"$A_2$ = {popt[2]:.4f}")
-                    info_lines.append(f"$y_0$ = {popt[0]:.4f}")
+                    info_list = [["$y_0$",0,  ""],
+                                 ["$A_1$",0, f"({abs(popt[1])*100/(abs(popt[1])+abs(popt[2])):.1f}%)"],
+                                 ["$A_2$",0, f"({abs(popt[2])*100/(abs(popt[1])+abs(popt[2])):.1f}%)"],
+                                 ["$τ_1$",1,  ""],
+                                 ["$τ_2$",1,  ""]]
+                    info_sequence = [3, 4, 1, 2, 0]
                 elif fit_function == secondary_decay:
-                    info_lines.append(f"$k^'$ = {popt[1]:.4f} /(μs·a.u.)")
-                    info_lines.append(f"1/$A_0$ = {popt[2]:.4f}")
-                    info_lines.append(f"$y_0$ = {popt[0]:.4f}")
+                    info_list = [["$y_0$",0,  ""],
+                                 ["$k^'$",-2,  ""],
+                                 ["$1/A_0$",0,  ""]]
+                    info_sequence = [1, 2, 0]
                 elif fit_function == primary_secondary_decay:
-                    info_lines.append(f"$k_1$ = {popt[1]:.4f} /μs")
-                    info_lines.append(f"$k_2^'$ = {popt[2]:.4f} /(μs·a.u.)")
-                    info_lines.append(f"const = {popt[3]:.4f} μs")
-                    info_lines.append(f"eps = {popt[4]:.4f}")
-                    info_lines.append(f"$y_0$ = {popt[0]:.4f}")
-                elif fit_function == primary_secondary_decay_eps1:
-                    info_lines.append(f"$k_1$ = {popt[1]:.4f} /μs")
-                    info_lines.append(f"$k_2^'$ = {popt[2]:.4f} /(μs·a.u.)")
-                    info_lines.append(f"const = {popt[3]:.4f} μs")
-                    info_lines.append(f"$y_0$ = {popt[0]:.4f}")
-                elif fit_function == primary_secondary_decay_efix and found_efix:
-                    info_lines.append(f"$k_1$ = {popt[1]:.4f} /μs")
-                    info_lines.append(f"$k_2^'$ = {popt[2]:.4f} /(μs·a.u.)")
-                    info_lines.append(f"const = {popt[3]:.4f} μs")
-                    info_lines.append(f"eps = {efix:.4f} (fixed)")
-                    info_lines.append(f"$y_0$ = {popt[0]:.4f}")
-                if WEIGHTING_FOR_FIT:
-                    info_lines.append(f"Weight({WEIGHT}) when t > {WEIGHTING_AFTER} μs")
+                    info_list = [["$y_0$", 0,  ""],
+                                 ["$k_1$", -1,  ""],
+                                 ["$k_2^'$", -2,  ""],
+                                 ["const", 0,  ""]]
+                    info_sequence = [1, 2, 3, 0]
+                elif fit_function == primary_rise:
+                    info_list = [["$y_0$", 0,  ""],
+                                 ["$A$", 0,  ""],
+                                 ["$k$", -1,  ""]]
+                    info_sequence = [2, 1, 0]
+                elif fit_function == primary_rise_linear_offset:
+                    info_list = [["$y_0$", 0,  ""],
+                                 ["$A$", 0,  ""],
+                                 ["$k$", -1,  ""],
+                                 ["$B$", -1,  ""]]
+                    info_sequence = [2, 1, 0, 3]
+                elif fit_function == double_primary_rise:
+                    info_list = [["$y_0$", 0,  ""],
+                                ["$A_1$", 0,  ""],
+                                ["$k_1$", -1,  ""],
+                                ["$A_2$", 0,  ""],
+                                ["$k_2$", -1,  ""]]
+                    info_sequence = [2, 4, 1, 3, 0]
+                elif fit_function == double_primary_rise_linear_offset:
+                    info_list = [["$y_0$", 0,  ""],
+                                ["$A_1$", 0,  ""],
+                                ["$k_1$", -1,  ""],
+                                ["$A_2$", 0,  ""],
+                                ["$k_2$", -1,  ""],
+                                ["$B$", -1,  ""]]
+                    info_sequence = [2, 4, 1, 3, 0, 5]
 
+                # Generate info lines
+                for i in info_sequence: 
+                    l = 1 if i in idx_to_scale_up else 0
+                    unit = parse_order_to_unit(info_list[i][1], levelup = l)
+                    info_lines.append(f"{info_list[i][0]} = {popt[i]:.4f} {unit} {info_list[i][2]}".strip())
+                # Add weighting info if applied
+                if WEIGHTING_FOR_FIT:
+                    info_lines.append(f"Weight({WEIGHT}) when t > {WEIGHTING_AFTER} {time_unit}")
+
+                # Then print
                 info_text = "\n".join(info_lines)
                 print(info_text)
                 #endregion
@@ -614,20 +795,8 @@ elif plot_mode == 1:
                             continue
                 #endregion
 
-                #region --- Refit if fit_function == primary_secondary_decay_efix ---
-                if fit_function == primary_secondary_decay_efix and (not found_efix):
-                    efix = fit_function(time_data[zero_index], *popt) / CONCENTRATION_LIST[0] * 1000
-                    print(f"Calculated efix = {efix:.4f}")
-                    # Then refit with fixed efix
-                    CUSTOM_INITIAL_GUESS = list(popt)
-                    CUSTOM_INITIAL_GUESS[3] = intensity_data[zero_index]
-                    ENABLE_CUSTOM_INITIAL_GUESS = True
-                    found_efix = True
-                    continue
-                #endregion
-
                 #region --- Plot Original Data and Fit ---
-
+                
                 # Plot the raw data points on the top subplot (ax1)
                 ax1.plot(time_data, intensity_data, 
                         label=f'Data',
@@ -655,7 +824,21 @@ elif plot_mode == 1:
                 # Plot residuals on the bottom subplot (ax2)
                 ax2.scatter(time_data[zero_index:], residuals, facecolors='none', edgecolors='gray', s=20)
                 ax2.axhline(0, color='black', linestyle='--', linewidth=1) # Add a zero line
-                
+
+                # Set axis limits if specified
+                if xmin or xmax:
+                    if X_CUT_AFTER is not None and (X_CUT_AFTER < xmax or xmax == 0):
+                        xmax = X_CUT_AFTER
+                    ax1.set_xlim(xmin, xmax)
+                    ax2.set_xlim(xmin, xmax)
+                if ymin or ymax:
+                    ax1.set_ylim(ymin, ymax)
+
+                if YMAX_OF_RESIDUAL:
+                    ax2.set_ylim(-YMAX_OF_RESIDUAL, YMAX_OF_RESIDUAL)
+                else:
+                    ax2.set_ylim(-residual_max * 1.1, residual_max * 1.1)
+
                 #endregion
 
                 if RETRY_FIT_IF_FAIL:
@@ -690,12 +873,7 @@ if plot_mode == 0:
 
     TITLE = rf'{type_title} spectrum of {TITLE0}' # EXAMINE it carefully!!!
 
-    pp.title(TITLE, fontsize = 18, fontweight = 'bold')
-
-    if xmin and xmax:
-        pp.xlim(xmin, xmax)
-    if ymin and ymax:
-        pp.ylim(ymin, ymax)
+    pp.title(TITLE, fontsize = TITLE_FONTSIZE, fontweight = 'bold')
 
 elif plot_mode == 1:
     # Finalize the top subplot (ax1)
@@ -707,19 +885,14 @@ elif plot_mode == 1:
     
     ax1.set_ylabel(ylabel)
     ax1.set_title(final_title, 
-                  fontsize=18, fontweight='bold')
-    if xmin is not None and xmax is not None:
-        ax1.set_xlim(xmin, xmax)
-    if ymin is not None and ymax is not None:
-        ax1.set_ylim(ymin, ymax)
+                  fontsize = TITLE_FONTSIZE, fontweight='bold')
+    
     if ENABLE_LEGEND:
         ax1.legend(loc="best")
     
     # Finalize the bottom subplot (ax2)
     ax2.set_xlabel(XLABEL)
     ax2.set_ylabel('Residuals')
-    if xmin is not None and xmax is not None:
-        ax2.set_xlim(xmin, xmax)
 
 #endregion --- End of Finalizing the plot ---------------
 
