@@ -1,3 +1,19 @@
+"""SpecPlot - Powerful tool for spectrum plotting and data processing."""
+import os
+import sys
+import re
+import json
+import math
+import tkinter as tk
+from tkinter import filedialog
+
+import numpy as np
+import scipy
+from matplotlib import pyplot as pp
+from scipy.optimize import curve_fit
+from scipy.interpolate import interp1d
+#from scipy.signal import convolve
+
 LATEST_UPDATE = "2026-02-17"
 VERSION = "0.2"
 
@@ -20,7 +36,7 @@ VERSION = "0.2"
 # 2: Baseline correction + Normalize maximum to 1
 # 3: Normalize by intensity at time-zero point
 
-# SPECIAL NOTES ON THE FITTED k_VALUES: 
+# SPECIAL NOTES ON THE FITTED k_VALUES:
 # The unit of secondary reaction rate constant k is 1/(μs·a.u.).
 # 1/(μs·a.u.) = 1/[ eps * (μs·mol·L^-1)] = 1e6/(eps * (s·mol·L^-1)).
 # If the intensity is 0.05 a.u., and c = 0.05 mM, then eps = 0.05 / 0.00005 = 1000.
@@ -31,54 +47,48 @@ VERSION = "0.2"
 # "linear": t, y0, k; y = y0 + k * t
 # "exp_decay": t, y0, A, tau; y = y0 + A * exp(-t / tau)
 # "exp_2decay": t, y0, A1, A2, tau1, tau2; y = y0 + A1 * exp(-t / tau1) + A2 * exp(-t / tau2)
-# "exp_3decay": t, y0, A1, A2, A3, tau1, tau2, tau3; y = y0 + A1 * exp(-t / tau1) + A2 * exp(-t / tau2) + A3 * exp(-t / tau3) 
+# "exp_3decay": t, y0, A1, A2, A3, tau1, tau2, tau3;
+# y = y0 + A1 * exp(-t / tau1) + A2 * exp(-t / tau2) + A3 * exp(-t / tau3)
 # "secondary_decay" t, y0, k, r0; y = y0 + 1 / (2 * k * t + r0)
-# "primary_secondary_decay" t, y0, k1, k2, const, eps; y = y0 + k1 / (exp(k1 * (t - const)) - 2 * k2)
-# "primary_secondary_seperate" t, y0, A, k1, k2, r0; y = y0 + A * exp( - k1 * t) + 1 / ( k2 * t + r0)
+# "primary_secondary_decay" t, y0, k1, k2, const, eps;
+# y = y0 + k1 / (exp(k1 * (t - const)) - 2 * k2)
+# "primary_secondary_seperate" t, y0, A, k1, k2, r0;
+# y = y0 + A * exp( - k1 * t) + 1 / ( k2 * t + r0)
 # "primary_rise": t, y0, A, k; y = y0 + A * (1 - exp(-k * t))
 # "primary_rise_linear_offset": t, y0, A, k, B; y = y0 + A * (1 - exp(-k * t)) + B * t
-# "double_primary_rise": t, y0, A1, k1, A2, k2; y = y0 + A1 * (1 - exp(-k1 * t)) + A2 * (1 - exp(-k2 * t))
-# "double_primary_rise_linear_offset": t, y0, A1, k1, A2, k2, B; y = y0 + A1 * (1 - exp(-k1 * t)) + A2 * (1 - exp(-k2 * t)) + B * t
+# "double_primary_rise": t, y0, A1, k1, A2, k2;
+# y = y0 + A1 * (1 - exp(-k1 * t)) + A2 * (1 - exp(-k2 * t))
+# "double_primary_rise_linear_offset":
+# t, y0, A1, k1, A2, k2, B; y = y0 + A1 * (1 - exp(-k1 * t)) + A2 * (1 - exp(-k2 * t)) + B * t
 # "primary_cascade": t, y0, A, k1, k2; y = y0 + A  * (exp(-k1 * t) - exp(-k2 * t))
 
-# Note: In initial guess of primary_secondary_decay, const = - ln(k1 / r0 + 2*k2) / k1, 
+# Note: In initial guess of primary_secondary_decay, const = - ln(k1 / r0 + 2*k2) / k1,
 # The input const is r0 (~0.05, the maximum of KA spectrum) actually.
-
-import os
-import sys
-import re
-import math
-import numpy as np
-import json
-import scipy
-import tkinter as tk
-from matplotlib import pyplot as pp
-from scipy.optimize import curve_fit
-from scipy.interpolate import interp1d
-from scipy.signal import convolve
-from tkinter import filedialog
 
 #region --- Basic functions ---
 
 # Colors for terminal output
 class Colors:
+    """Define ANSI escape codes for colored terminal output."""
     BLUE = '\033[94m'
+    GREEN = '\033[92m'
     WARNING = '\033[93m'
     ERROR = '\033[91m'
     BOLD = '\033[1m'
     END = '\033[0m'
 
-def infer_time_unit(scale):
+def infer_time_unit(time_scale):
+    """Infer time unit string based on the given scale (in seconds)."""
     mapping = {1.0: 'ns', 1e-3: 'μs', 1e-6: 'ms', 1e-9: 's'}
     # exact match (within tol)
-    for k, v in mapping.items():
-        if math.isclose(scale, k, rel_tol=1e-9, abs_tol=1e-12):
-            return v
+    for scale_key, unit_val in mapping.items():
+        if math.isclose(time_scale, scale_key, rel_tol=1e-9, abs_tol=1e-12):
+            return unit_val
     # fallback: choose the nearest by log10 distance
     try:
-        closest = min(mapping.keys(), key=lambda k: abs(math.log10(scale) - math.log10(k)))
+        closest = min(mapping.keys(), key=lambda k: abs(math.log10(time_scale) - math.log10(k)))
         return mapping[closest]
-    except Exception:
+    except (ValueError, ZeroDivisionError):
         return 'ns'
 
 def detect_time_zero(time, intensity, search_fraction=0.25, smooth_window=5, mode=-1):
@@ -97,7 +107,7 @@ def detect_time_zero(time, intensity, search_fraction=0.25, smooth_window=5, mod
     """
     if mode == 0:
         return float(time[np.argmax(np.abs(intensity))])
-    elif mode == 1:
+    if mode == 1:
         t = np.asarray(time)
         y = np.asarray(intensity)
         if t.size < 3:
@@ -124,63 +134,78 @@ def detect_time_zero(time, intensity, search_fraction=0.25, smooth_window=5, mod
         try:
             idxs = np.where(mask)[0]
             rel_idx = int(np.argmax(np.abs(dy_s[idxs])))
-            tz = float(t[idxs][rel_idx])
-            return tz
-        except Exception:
+            detected_tz = float(t[idxs][rel_idx])
+            return detected_tz
+        except (IndexError, ValueError):
             return float(t[np.argmin(np.abs(t))])
-    else:
-        return 0.0
+    return 0.0
 
 #endregion --- Basic functions ---
 
 #region --- Basic fitting functions ---
 
 def linear(t, y0, k):
+    """y0 + k*t"""
     return y0 + k * t
 
 def exp_decay(t, y0, A, tau):
+    """y0 + A*exp(-t/tau)"""
     return y0 + A * np.exp(-t / tau)
 
 def exp_2decay(t, y0, A1, A2, tau1, tau2):
+    """y0 + A1*exp(-t/tau1) + A2*exp(-t/tau2)"""
     return y0 + A1 * np.exp(-t / tau1) + A2 * np.exp(-t / tau2)
 
 def exp_3decay(t, y0, A1, A2, A3, tau1, tau2, tau3):
+    """y0 + A1*exp(-t/tau1) + A2*exp(-t/tau2) + A3*exp(-t/tau3)"""
     return y0 + A1 * np.exp(-t / tau1) + A2 * np.exp(-t / tau2) + A3 * np.exp(-t / tau3)
 
 def secondary_decay(t, y0, k, r0):
+    """y0 + 1/(k*t + r0)"""
     return y0 + 1 / (k * t + r0)
 
 def primary_secondary_decay(t, y0, k1, k2, const):
+    """y0 + k1/(exp(k1*(t-const)) - 2*k2)"""
     return y0 + k1 / (np.exp(k1 * (t - const)) - 2 * k2)
 
 def primary_secondary_seperate(t, y0, A, k1, k2, r0):
+    """y0 + A*exp(-k1*t) + 1/(k2*t + r0)"""
     return y0 + A * np.exp( - k1 * t) + 1 / ( k2 * t + r0)
 
 def primary_rise(t, y0, A, k):
+    """y0 + A*(1 - exp(-k*t))"""
     return y0 + A * (1 - np.exp(-k * t))
 
 def primary_rise_linear_offset(t, y0, A, k, B):
+    """y0 + A*(1 - exp(-k*t)) + B*t"""
     return y0 + A * (1 - np.exp(-k * t)) + B * t
 
 def primary_rise_double_offset(t, y0, A, k, B, t0):
+    """y0 + A*(1 - exp(-k*(t-t0))) + B*t"""
     return y0 + A * (1 - np.exp(-k * (t - t0))) + B * t
 
 def primary_rise_triple_offset(t, y0, A, k, B, C, t0):
+    """y0 + A*(C - exp(-k*(t-t0))) + B*t"""
     return y0 + A * (C - np.exp(-k * (t - t0))) + B * t
 
 def double_primary_rise(t, y0, A1, k1, A2, k2):
+    """y0 + A1*(1-exp(-k1*t)) + A2*(1-exp(-k2*t))"""
     return y0 + A1 * (1 - np.exp(-k1 * t)) + A2 * (1 - np.exp(-k2 * t))
 
 def double_primary_rise_linear_offset(t, y0, A1, k1, A2, k2, B):
+    """y0 + A1*(1-exp(-k1*t)) + A2*(1-exp(-k2*t)) + B*t"""
     return y0 + A1 * (1 - np.exp(-k1 * t)) + A2 * (1 - np.exp(-k2 * t)) + B * t
 
 def primary_cascade(t, y0, A, k1, k2):
+    """y0 + A*(exp(-k1*t) - exp(-k2*t))"""
     return y0 + A  * (np.exp(-k1 * t) - np.exp(-k2 * t))
 
 def gaussian(t, y0, A, t0, sigma):
+    """y0 + A*exp((t-t0)^2/(2*sigma^2))"""
     return y0 + A * np.exp((t - t0)**2 / (2 * sigma ** 2))
 
 def primary_rise_with_gaussian(t, y0, A, k, B, t0, sigma, C):
+    """y0 + A*(1-exp(-k*t)) + B*exp(-0.5*(t-t0/sigma)^2) + C*t"""
     return y0 + A * (1 - np.exp(-k * t)) + B * np.exp( -0.5 * (t - t0 / sigma) ** 2) + C * t
 
 FIT_MODELS = {
@@ -231,7 +256,7 @@ FIT_MODELS = {
     "rd": secondary_decay,
     "1/x": secondary_decay,
     "2": secondary_decay,
-    
+
     "primary_secondary": primary_secondary_decay,
     "primary_secondary_decay": primary_secondary_decay,
     "psd": primary_secondary_decay,
@@ -309,6 +334,7 @@ FIT_MODELS = {
 
 # Invoke a file dialog to select the input JSON configuration file
 def select_file():
+    """Call the filedialog and select an input file. Return str: route/filename."""
     root = tk.Tk()
     root.wm_attributes('-topmost', 1)
     root.withdraw()
@@ -323,7 +349,8 @@ def initialize(input_json_path=None):
     Then, set up global variables, decide mode of plotting / plotting settings.
     Finally return the loaded config dict.
     """
-    global INPUT_JSON_PATH, config, RUN_LIST, RUN_DIR, TYPE, CONCENTRATION_LIST, FILENAME, FILENAME_MODE
+    global INPUT_JSON_PATH, config, RUN_LIST, RUN_DIR, TYPE, CONCENTRATION_LIST
+    global FILENAME, FILENAME_MODE
     global AUTOLABEL, LABEL_LIST, BLANK, COLOR_LIST, TITLE0, TITLE_FONTSIZE
     global LINEWIDTH, WAVELENGTH_DETECTED, LENGTH, FIGSIZE, ENABLE_LEGEND, FONTSIZE
     global SHOW_RUN_NUMBER, XLABEL, YLABEL, XMIN, XMAX, YMIN, YMAX, YMAX_OF_RESIDUAL
@@ -332,8 +359,10 @@ def initialize(input_json_path=None):
     global INTERSECTION_ABS_TOL, DO_FITTING, FIT_FUNCTION, SHOW_FITTING_INFO
     global NORMALIZATION_METHOD, ENABLE_CUSTOM_INITIAL_GUESS, CUSTOM_INITIAL_GUESS
     global UPPER_BOUND, LOWER_BOUND, FIX_VALUE, ERROR_ANALYSIS, BASELINE_ID
-    global POSITION_OF_FITTING_INFO, RETRY_FIT_IF_FAIL, WEIGHTING_FOR_FIT, IRF_ID, IRF_WIDTH, DISCARD_POINTS_WHEN_RECONV, RECONV_TZ
-    global WEIGHTING_AFTER, WEIGHT, TO_FIND_TIME_ZERO, AUTO_FIND_TIME_ZERO, LOOP, COPY_FILENAME_TO_CLIPBOARD
+    global POSITION_OF_FITTING_INFO, RETRY_FIT_IF_FAIL, WEIGHTING_FOR_FIT
+    global IRF_ID, IRF_WIDTH, DISCARD_POINTS_WHEN_RECONV, RECONV_TZ
+    global WEIGHTING_AFTER, WEIGHT, TO_FIND_TIME_ZERO, AUTO_FIND_TIME_ZERO
+    global LOOP, COPY_FILENAME_TO_CLIPBOARD
     global type_title, plot_mode, label_list
 
     if input_json_path == "NULL":
@@ -350,7 +379,7 @@ def initialize(input_json_path=None):
         print('Reading configuration from:', INPUT_JSON_PATH)
     else:
         print('No configuration file selected. Exiting.')
-        exit(0)
+        sys.exit()
 
     with open(INPUT_JSON_PATH, 'r', encoding='utf-8') as f:
         config = json.load(f)
@@ -360,7 +389,7 @@ def initialize(input_json_path=None):
     RUN_LIST = config.get("RUN_LIST", [])
     if not RUN_LIST:
         print("RUN_LIST is empty. Exiting.")
-        exit(0)
+        sys.exit()
 
     RUN_DIR = config.get("RUN_DIR", None)
     FILENAME = config.get("FILENAME", "")
@@ -434,9 +463,9 @@ def initialize(input_json_path=None):
         json_dir = os.path.dirname(INPUT_JSON_PATH)
         try:
             RUN_DIR = os.path.relpath(json_dir, os.getcwd())
-        except Exception:
+        except (ValueError, TypeError):
             RUN_DIR = json_dir
-        if RUN_DIR == '.' or RUN_DIR == './':
+        if RUN_DIR in ('.', './'):
             RUN_DIR = ''
         RUN_DIR = RUN_DIR.replace('\\', '/').lstrip('./\\')
 
@@ -476,7 +505,7 @@ def initialize(input_json_path=None):
             else:
                 CONCENTRATION_LIST.append(1.0)
         print(f'{Colors.WARNING}!Warning: CONCENTRATION_LIST length is less than RUN_LIST length. Extended by repeating last value.{Colors.END}')
-    
+
     # Adjust BASELINE_ID to list
     if isinstance(BASELINE_ID, int):
         BASELINE_ID = [BASELINE_ID] * len(RUN_LIST)
@@ -505,12 +534,12 @@ def initialize(input_json_path=None):
     if TYPE == "TA":
         type_title = 'TA'
         YLABEL = '∆OD (a. u.)'
-    if TYPE == "UV" or TYPE == "UV-Vis":
+    if TYPE in ('UV', 'UV-Vis'):
         type_title = 'UV-Vis'
         YLABEL = 'Absorbance (A)'
         if NORMALIZATION_METHOD == 1:
             YLABEL = 'ε (L·mol$^{-1}$·cm$^{-1}$)'
-    if TYPE == "FL" or TYPE == "E00":
+    if TYPE in ("FL", "E00"):
         type_title = 'Fluorescence'
         YLABEL = 'Counts'
     if TYPE == "EX":
@@ -519,7 +548,7 @@ def initialize(input_json_path=None):
     if TYPE == "EM":
         type_title = 'Fluorescence emission'
         YLABEL = 'Counts'
-    if (TYPE == "KinAbs" or TYPE == "KA") and not DO_FITTING:
+    if TYPE in ('KinAbs', 'KA') and not DO_FITTING:
         type_title = 'Absorption kinetics'
         YLABEL = '∆OD (a. u.)'
     if TYPE == "TC-SPC" and not DO_FITTING:
@@ -528,15 +557,15 @@ def initialize(input_json_path=None):
 
     # Normalize with the max of y
     if NORMALIZATION_METHOD == 2:
-        if TYPE == 'E00' or TYPE == 'FL' or TYPE == 'EX' or TYPE == 'EM':
+        if TYPE in ('E00', 'FL', 'EX', 'EM'):
             YLABEL = 'Normalized fluorescence intensity'
-        elif TYPE == 'UV' or TYPE == 'UV-Vis':
+        elif TYPE in ('UV', 'UV-Vis'):
             YLABEL = 'Normalized absorbance'
         else:
             YLABEL = 'Normalized unit'
 
     # plot_mode = 1
-    if (TYPE == "KinAbs" or TYPE == "KA") and DO_FITTING:
+    if TYPE in ('KinAbs', 'KA') and DO_FITTING:
         type_title = 'Absorption kinetics'
         XLABEL = f'Time ({infer_time_unit(x_scale[0])})'
         YLABEL = '∆OD (a. u.)'
@@ -567,7 +596,7 @@ def initialize(input_json_path=None):
                 label_list.append(f'Run{r:02d}')
             else:
                 label_list.append(str(r))
-    
+
     # Fill the label_list with ""
     if len(label_list) < len(RUN_LIST):
         while len(label_list) < len(RUN_LIST):
@@ -575,19 +604,19 @@ def initialize(input_json_path=None):
 
     # Add run_number
     if SHOW_RUN_NUMBER:
-        for i in range(len(label_list)):
+        for i, _ in enumerate(label_list):
             if isinstance(RUN_LIST[i], int):
                 label_list[i] += f' (Run{RUN_LIST[i]:02d})'
             else:
                 label_list[i] += f' (Run{RUN_LIST[i]})'
-    
+
     # Global settings of figures
     pp.rcParams['font.family'] = 'sans-serif'
     pp.rcParams['font.sans-serif'] = ['Arial']
     pp.rcParams['font.size'] = FONTSIZE
 
     # Set up color list if input COLOR_LIST is a string (colormap name)
-    if type(COLOR_LIST) == str:
+    if isinstance(COLOR_LIST, str):
         ncolors = max(1, len(RUN_LIST))
         cmap_name = config.get("COLOR_LIST", "viridis")
         try:
@@ -604,23 +633,24 @@ def initialize(input_json_path=None):
 
     return config
 
-print(f"{Colors.BLUE}{Colors.BOLD}Spec_Plot_TA.py v{VERSION} (Last update: {LATEST_UPDATE}){Colors.END}")
+print(f"{Colors.BLUE}{Colors.BOLD}SpecPlot v{VERSION} (Last update:{LATEST_UPDATE}){Colors.END}")
+
 # Resolve the input from console, then initialize.
-cmd_input = None
+CMD_INPUT = None
 if len(sys.argv) > 1:
     for arg in sys.argv[1:]:
         if not arg.startswith('-'):
-            cmd_input = arg
+            CMD_INPUT = arg
             break
-config = initialize(cmd_input) # Load configuration and initialize
+config = initialize(CMD_INPUT) # Load configuration and initialize
 
 #endregion --- Initialize ---
 
 #region --- Parsing functions ---------------
 
-# Find RunXX_<TYPE>_YY_ZZ.txt file in the directory, 
-# if work_type is '', find RunXX*.txt.
 def find_run_file(num, directory = None, work_type = ''):
+    '''Find RunXX_<TYPE>_YY_ZZ.txt file in the directory, 
+    if work_type is '', find RunXX*.txt.'''
     if directory is None:
         directory = RUN_DIR
     cwd = rf'{os.getcwd()}' + '\\'
@@ -633,20 +663,20 @@ def find_run_file(num, directory = None, work_type = ''):
         match = pattern.match(fname)
         if match:
             return cwd + directory + '\\' + fname
-        
-    print(cwd + directory)
-    return None  
 
-# This function extracts UV/Fluorescence/TA data from the specified file, 
-# also suitable to kinetic absorption data (t/ns, ∆OD/a.u.)
+    print(cwd + directory)
+    return None
+
 def extract_data(num, directory = None, return_meta = False, type_adjust = ''):
+    '''This function extracts UV/Fluorescence/TA data from the specified file,
+    also suitable to kinetic absorption data (t/ns, ∆OD/a.u.)'''
     if directory is None:
         directory = RUN_DIR
     file_path = find_run_file(num, directory, type_adjust)
     with open(file_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
     # Read the data lines
-    data = []
+    data_pts = []
     meta_lines = []
 
     for line in lines:
@@ -654,69 +684,70 @@ def extract_data(num, directory = None, return_meta = False, type_adjust = ''):
         # Accept data lines with more than two columns, provided every part is numeric
         if len(parts) >= 2:
             try:
-                # Normalize possible FORTRAN-style 'D' exponent and parse all parts to ensure numeric
+                # Parse possible FORTRAN-style 'D' or 'E+' exponent to 'E'
                 cleaned = [p.upper().replace('D', 'E').replace('E+', 'E') for p in parts]
                 nums = [float(p) for p in cleaned]
                 x = nums[0]
                 y = nums[1]
-                data.append([x, y])
+                data_pts.append([x, y])
                 continue
             except ValueError:
                 pass  # Not a numeric data line
         meta_lines.append(line.rstrip('\n'))
 
     if return_meta:
-        return np.array(data), meta_lines
-    else:
-        return np.array(data)
+        return np.array(data_pts), meta_lines
+    return np.array(data_pts)
 
-
-# Parse order(int) to unit string
-# Order: 0 - No unit; 1 - time unit; -1 - time unit inverse; -2 - secondary (μs^-1·a.u.^-1); 10 a.u.
-def parse_order_to_unit(order, scale = x_scale[0], levelup = 0):
-    time_unit = infer_time_unit(scale * (10 ** ( - levelup * 3)))
-    if order == 0:
-        return ""
-    elif order == 1:
+def parse_order_to_unit(order, time_scale = None, levelup = 0):
+    '''Parse order(int) to unit string
+        Order: 0 - No unit; 1 - time unit; -1 - time unit inverse;
+        -2 - secondary (μs^-1·a.u.^-1); 10 a.u.'''
+    if time_scale is None:
+        time_scale = x_scale[0]
+    time_unit = infer_time_unit(time_scale * (10 ** ( - levelup * 3)))
+    if order == 1:
         return f"{time_unit}"
-    elif order == 2:
+    if order == 2:
         return f"{time_unit}²"
-    elif order == -1:
+    if order == -1:
         return f"/{time_unit}"
-    elif order == -2:
+    if order == -2:
         return f"/({time_unit}·a.u.)"
-    elif order == 10:
-        return f"a.u."
+    if order == 10:
+        return "a.u."
+    return ""
 
 #endregion --- Parsing functions ---------------
 
 #region --- Processing functions ---------------
 
-def reconvolve(func, params, t, irf_t, irf_y, tz=0.0, offset=0.0, width=None):
+def reconvolve(func, params, t, irf_t, irf_y, tzero=0.0, offset=0.0, width=None):
+    """Numerically convolve function 'func' with a specified experimental IRF 
+    (irf_t, irf_y). Return a convolved discrete 1D-ndarray."""
     if width is None or width <= 0:
         width = IRF_WIDTH
     # 10% of width in number of points
-    extension = 0.1 * width / (t[1] - t[0])
+    ##extension = 0.1 * width / (t[1] - t[0])
     # Make time grids
     t_grid = np.arange(t.min(), t.max(), t[1] - t[0])
     # Interpolation
     f_irf = interp1d(irf_t, irf_y, kind='cubic', fill_value="extrapolate")
     irf_resampled = f_irf(t_grid)
-    t_irf_centered = t_grid - t_grid[np.argmax(irf_resampled)] + tz
-    mask = (t_irf_centered >= -width) & (t_irf_centered <= width)
-    irf_final = irf_resampled[mask]
+    t_irf_centered = t_grid - t_grid[np.argmax(irf_resampled)] + tzero
+    irf_final = irf_resampled[(t_irf_centered >= -width) & (t_irf_centered <= width)]
     # Normalize to area = 1
     irf_final /= irf_final.sum()
-    
-    f_model = func(t_grid - tz, *params)
-    f_model[t_grid < tz] = 0.0 # Set negative time to zero
+
+    f_model = func(t_grid - tzero, *params)
+    f_model[t_grid < tzero] = 0.0 # Set negative time to zero
     f_conv = np.convolve(f_model, irf_final, mode='same')
     f_conv = f_conv[(t_grid >= t.min()) & (t_grid <= t.max())]
     # f_conv = convolve(f_model, irf_resampled, mode='same')
     # f_conv = np.asarray(f_conv)
     return f_conv + offset
 
-def find_curve_intersections(x1, y1, x2, y2, xtol=1e-8, abs_tol=4e-2):
+def find_curve_intersections(x1, y1, x2, y2, xtol=1e-8, abs_tol=1e-2):
     """
     Return a list of (x, y) intersection points between two 1D curves.
 
@@ -724,15 +755,16 @@ def find_curve_intersections(x1, y1, x2, y2, xtol=1e-8, abs_tol=4e-2):
     for sign changes in the difference, and uses a root finder to refine the
     intersection positions.
     """
-    x1 = np.asarray(x1); y1 = np.asarray(y1)
-    x2 = np.asarray(x2); y2 = np.asarray(y2)
-
+    x1 = np.asarray(x1)
+    y1 = np.asarray(y1)
+    x2 = np.asarray(x2)
+    y2 = np.asarray(y2)
     # Sort by x to be safe
-    s1 = np.argsort(x1); x1, y1 = x1[s1], y1[s1]
-    s2 = np.argsort(x2); x2, y2 = x2[s2], y2[s2]
-
+    s1 = np.argsort(x1)
+    x1, y1 = x1[s1], y1[s1]
+    s2 = np.argsort(x2)
+    x2, y2 = x2[s2], y2[s2]
     # Build a common grid (intersection of x1 and x2) from unique x-values
-    #x_common = np.intersect1d(x1, x2), backup
     x_common = np.unique(x1[np.any(np.isclose(x1[:, None], x2[None, :], atol=1e-2), axis=1)])
     if x_common.size == 0:
         return []
@@ -742,50 +774,48 @@ def find_curve_intersections(x1, y1, x2, y2, xtol=1e-8, abs_tol=4e-2):
     diff = y1i - y2i
     y_max = max(np.max(np.abs(y1i)), np.max(np.abs(y2i)))
 
-    intersections = []
+    _intersections = []
 
     # Exact zeros (within tolerance)
     zero_idx = np.where(np.isclose(diff, 0.0, atol=1e-12, rtol=0))[0]
     for idx in zero_idx:
-        xi = float(x_common[idx])
-        yi = float(y1i[idx])
-        # The point is considered an intersection only if the y-value is significant (yi/ymax is greater than abs_tol)
-        if y_max != 0 and (abs(yi) / y_max) >= abs_tol:
+        _xi = float(x_common[idx])
+        _yi = float(y1i[idx])
+        # The point is considered an intersection only if
+        # the y-value is significant (yi/ymax is greater than abs_tol)
+        if y_max != 0 and (abs(_yi) / y_max) >= abs_tol:
             # Then add the intersection
-            intersections.append((xi, yi))
+            _intersections.append((_xi, _yi))
 
     # Sign changes indicate a root in the interval
     signs = np.sign(diff)
     sign_change_idx = np.where(signs[:-1] * signs[1:] < 0)[0]
 
     for idx in sign_change_idx:
-        a = float(x_common[idx]); b = float(x_common[idx+1])
+        a = float(x_common[idx])
+        b = float(x_common[idx+1])
         f = lambda x: np.interp(x, x1, y1) - np.interp(x, x2, y2)
         try:
             root = float(scipy.optimize.brentq(f, a, b, xtol=xtol))
             yroot = float(np.interp(root, x1, y1))
             if y_max != 0 and (abs(yroot) / y_max) >= abs_tol:
-                intersections.append((root, yroot))
-        except Exception:
-            # If brentq fails for any reason, skip this interval
+                _intersections.append((root, yroot))
+        except (ValueError, RuntimeError): # If brentq fails for any reason, skip this interval
             continue
-
     # Remove duplicates (within tolerance) and sort by x
-    if not intersections:
+    if not _intersections:
         return []
     # Sort and merge near-duplicates
-    intersections = sorted(intersections, key=lambda t: t[0])
-    merged = [intersections[0]]
-    for x,y in intersections[1:]:
+    _intersections = sorted(_intersections, key=lambda t: t[0])
+    merged = [_intersections[0]]
+    for x,y in _intersections[1:]:
         if abs(x - merged[-1][0]) > 1e-8:
             merged.append((x,y))
     return merged
 
 def preprocess_data(i, entry, pmode = None, norm = None, c_list = None):
-    # This function centralizes the preprocessing logic for a single RUN_LIST entry.
-    # Returns a numpy array with two columns (x, y) or an empty (0,2) array on error.
-    # Uses globals: y_scale, x_scale, X_CORR, Y_CORR, X_CUT_AFTER, NORMALIZATION_METHOD,
-    # CONCENTRATION_LIST, LENGTH, Y_SCALE_FACTOR_IN_UNIT
+    '''This function centralizes the preprocessing logic for a single RUN_LIST entry.
+    Returns a numpy array with two columns (x, y) or an empty (0,2) array on error.'''
     global y_scale, X_CORR, XMAX, XMIN
     # Resolve defaults at call time from current globals (avoid binding at definition time)
     if pmode is None:
@@ -793,14 +823,14 @@ def preprocess_data(i, entry, pmode = None, norm = None, c_list = None):
     if norm is None:
         norm = NORMALIZATION_METHOD
     if c_list is None:
-       c_list = CONCENTRATION_LIST
+        c_list = CONCENTRATION_LIST
     # Convert string entry to int if possible
     if isinstance(entry, str):
         try:
             entry = int(entry)
         except ValueError:
             pass  # Keep as string for formula processing
-    
+
     # integer run
     if isinstance(entry, int):
         data = extract_data(entry)
@@ -824,17 +854,14 @@ def preprocess_data(i, entry, pmode = None, norm = None, c_list = None):
         if data.size:
             # For kinetics plot, automatically find the time zero:
             if pmode == 1 and AUTO_FIND_TIME_ZERO:
-                try:
-                    tz = detect_time_zero(data[:,0], data[:,1], mode=0)
-                    print(f'Autofound time zero at {tz}')
-                    # Shift time axis so detected tz becomes zero
-                    data[:,0] = data[:,0] - tz
-                    # Shift XMIN and XMAX
-                    if (XMIN or XMAX):
-                        XMIN -= tz
-                        XMAX -= tz
-                except Exception as e:
-                    print('Could not detect time-zero:', e)
+                _tz = detect_time_zero(data[:,0], data[:,1], mode=0)
+                print(f'Autofound time zero at {_tz}')
+                # Shift time axis so detected tz becomes zero
+                data[:,0] = data[:,0] - _tz
+                # Shift XMIN and XMAX
+                if (XMIN or XMAX):
+                    XMIN -= _tz
+                    XMAX -= _tz
 
             # Then apply scale, corrections, and x_cut
             data[:,0] = data[:,0] * x_scale[i] + X_CORR[i]
@@ -847,7 +874,8 @@ def preprocess_data(i, entry, pmode = None, norm = None, c_list = None):
     # subtraction entry: 'A-B' -> compute RunA - RunB on a common x-grid
     elif isinstance(entry, str) and re.match(r"^\s*\d+\s*-\s*\d+\s*$", entry):
         m = re.match(r"^\s*(\d+)\s*-\s*(\d+)\s*$", entry)
-        a = int(m.group(1)); b = int(m.group(2))
+        a = int(m.group(1))
+        b = int(m.group(2))
         data_a = extract_data(a)
         data_b = extract_data(b)
 
@@ -856,9 +884,8 @@ def preprocess_data(i, entry, pmode = None, norm = None, c_list = None):
         local_y_scale_b = y_scale[i]
         if pmode == 0:
             if norm == 1:
-                scale = 1000.0 / (c_list[i] * LENGTH * Y_SCALE_FACTOR_IN_UNIT)
-                local_y_scale_a *= scale
-                local_y_scale_b *= scale
+                local_y_scale_a *= 1000.0 / (c_list[i] * LENGTH * Y_SCALE_FACTOR_IN_UNIT)
+                local_y_scale_b *= 1000.0 / (c_list[i] * LENGTH * Y_SCALE_FACTOR_IN_UNIT)
             if norm == 2:
                 ya_max = np.max(data_a[:,1]) if data_a.size else 0
                 yb_max = np.max(data_b[:,1]) if data_b.size else 0
@@ -877,27 +904,21 @@ def preprocess_data(i, entry, pmode = None, norm = None, c_list = None):
         if data_a.size:
             # For kinetics plot, automatically find the time zero:
             if pmode == 1 and AUTO_FIND_TIME_ZERO:
-                try:
-                    tza = detect_time_zero(data_a[:,0], data_a[:,1], mode=0)
-                    print(f'Autofound time zero at {tza} for data_a')
-                    # Shift time axis so detected tz becomes zero
-                    data_a[:,0] = data_a[:,0] - tza
-                except Exception as e:
-                    print('Could not detect time-zero:', e)
-            
+                tza = detect_time_zero(data_a[:,0], data_a[:,1], mode=0)
+                print(f'Autofound time zero at {tza} for data_a')
+                # Shift time axis so detected tz becomes zero
+                data_a[:,0] = data_a[:,0] - tza
+
             data_a[:,0] = data_a[:,0] * x_scale[i] + X_CORR[i]
             data_a[:,1] = data_a[:,1] * local_y_scale_a + Y_CORR[i]
 
         if data_b.size:
             # For kinetics plot, automatically find the time zero:
             if pmode == 1 and AUTO_FIND_TIME_ZERO:
-                try:
-                    tzb = detect_time_zero(data_b[:,0], data_b[:,1], mode=0)
-                    print(f'Autofound time zero at {tzb} for data_b')
-                    # Shift time axis so detected tz becomes zero
-                    data_b[:,0] = data_b[:,0] - tzb
-                except Exception as e:
-                    print('Could not detect time-zero:', e)
+                tzb = detect_time_zero(data_b[:,0], data_b[:,1], mode=0)
+                print(f'Autofound time zero at {tzb} for data_b')
+                # Shift time axis so detected tz becomes zero
+                data_b[:,0] = data_b[:,0] - tzb
 
             data_b[:,0] = data_b[:,0] * x_scale[i] + X_CORR[i]
             data_b[:,1] = data_b[:,1] * local_y_scale_b + Y_CORR[i]
@@ -914,29 +935,31 @@ def preprocess_data(i, entry, pmode = None, norm = None, c_list = None):
                 data_b = data_b[data_b[:,0] <= X_CUT_AFTER]
 
         # Interpolate both onto a common x grid (union of x-values)
-        x_common = np.unique(np.concatenate([data_a[:,0] if data_a.size else np.array([]), data_b[:,0] if data_b.size else np.array([])]))
+        x_common = np.unique(np.concatenate([data_a[:,0] if data_a.size else np.array([]),
+                                             data_b[:,0] if data_b.size else np.array([])]))
         if x_common.size == 0:
             print(f"{Colors.WARNING}!Warning: No data points found for '{entry}'.{Colors.END}")
             return np.empty((0,2))
-        else:
-            y_a = np.interp(x_common, data_a[:,0], data_a[:,1]) if data_a.size else np.zeros_like(x_common)
-            y_b = np.interp(x_common, data_b[:,0], data_b[:,1]) if data_b.size else np.zeros_like(x_common)
-            y_diff = y_a - y_b
-            return np.column_stack([x_common, y_diff])
+
+        _zeros = np.zeros_like(x_common)
+        y_a = np.interp(x_common, data_a[:,0], data_a[:,1]) if data_a.size else _zeros
+        y_b = np.interp(x_common, data_b[:,0], data_b[:,1]) if data_b.size else _zeros
+        y_diff = y_a - y_b
+        return np.column_stack([x_common, y_diff])
 
     # addition / averaging entry: 'A+B(+C+...)' -> compute average of specified Runs
     elif isinstance(entry, str) and re.match(r"^\s*\d+(\s*\+\s*\d+)+\s*$", entry):
         nums = [int(n) for n in re.findall(r"\d+", entry)]
         data_list = []
-        for n in nums:
-            d = extract_data(n)
+        for _i in nums:
+            d = extract_data(_i)
             data_list.append(d)
 
         # Determine per-run local y scales
         local_y_scales = []
         if pmode == 0 and norm == 1:
-            scale = 1000.0 / (c_list[i] * LENGTH * Y_SCALE_FACTOR_IN_UNIT)
-            local_y_scales = [scale] * len(nums)
+            _scale = 1000.0 / (c_list[i] * LENGTH * Y_SCALE_FACTOR_IN_UNIT)
+            local_y_scales = [_scale] * len(nums)
         elif pmode == 0 and norm == 2:
             for d in data_list:
                 maxv = np.max(d[:,1]) if d.size else 0
@@ -955,14 +978,12 @@ def preprocess_data(i, entry, pmode = None, norm = None, c_list = None):
                 continue
             # For kinetics plot, automatically find the time zero:
             if pmode == 1 and AUTO_FIND_TIME_ZERO:
-                try:
-                    tz = detect_time_zero(d[:,0], d[:,1])
-                    print(f'Autofound time zero at {tz} for data {k}')
-                    # Shift time axis so detected tz becomes zero
-                    d[:,0] = d[:,0] - tz
-                    xtz.append(tz)
-                except Exception as e:
-                    print('Could not detect time-zero:', e)
+                _tz = detect_time_zero(d[:,0], d[:,1])
+                print(f'Autofound time zero at {_tz} for data {k}')
+                # Shift time axis so detected tz becomes zero
+                d[:,0] = d[:,0] - _tz
+                xtz.append(_tz)
+
             # Apply time_zero
             d[:,0] = d[:,0] * x_scale[i] + X_CORR[i]
             d[:,1] = d[:,1] * local_y_scales[k] + Y_CORR[i]
@@ -981,44 +1002,46 @@ def preprocess_data(i, entry, pmode = None, norm = None, c_list = None):
         if not valid_ds:
             print(f"{Colors.WARNING}!Warning: No data points found for '{entry}'.{Colors.END}")
             return np.empty((0,2))
-        else:
-            x_common = np.unique(np.concatenate([d[:,0] for d in valid_ds]))
-            if x_common.size == 0:
-                print(f"{Colors.WARNING}!Warning: No data points found for '{entry}'.{Colors.END}")
-                return np.empty((0,2))
-            else:
-                ys = [np.interp(x_common, d[:,0], d[:,1]) for d in valid_ds]
-                y_avg = np.mean(np.vstack(ys), axis=0)
-                return np.column_stack([x_common, y_avg])
+
+        x_common = np.unique(np.concatenate([d[:,0] for d in valid_ds]))
+        if x_common.size == 0:
+            print(f"{Colors.WARNING}!Warning: No data points found for '{entry}'.{Colors.END}")
+            return np.empty((0,2))
+
+        _ys = [np.interp(x_common, d[:,0], d[:,1]) for d in valid_ds]
+        y_avg = np.mean(np.vstack(_ys), axis=0)
+        return np.column_stack([x_common, y_avg])
 
     else:
         print(f"{Colors.ERROR}!Error: Unrecognized RUN_LIST entry '{entry}'.{Colors.END}")
         return np.empty((0,2))
 
-def normalize_before_fitting(y, time_zero_index, norm = None, time_data = None, print_statistics = False, pts = 300, main_data = True, conc = 0.0):
-    """Normalize data before fitting. Returns a tuple: (intensity_fit, baseline, scale,c SNR).
-    This function also calculates the statictics: baseline and SNR, which can be used for fitting and error analysis."""
+def normalize_before_fitting(y, tzero_index, norm = None, tdata = None,
+                             print_statistics = False, pts = 300, main_data = True, conc = 0.0):
+    """Normalize data before fitting. Returns a tuple: (intensity_fit, baseline, scale, SNR).
+    This function also calculates the statictics: baseline, SNR, etc.
+    Returning SNR is a list: [Amplitude, Noise, SNR_value, amp/conc]."""
     if norm is None:
         norm = NORMALIZATION_METHOD
-    scale = 1.0
-    baseline = 0.0
+    _scale = 1.0
+    _baseline = 0.0
     ymax = np.max(y)
-    # [signal_amplitude, noise, snr_value, amp/conc], SNR initialized to -1.0 to indicate not calculated
-    snr = [0.0, 0.0, -1.0, 0.0]
+    # SNR initialized to -1.0 to indicate not calculated
+    _snr = [0.0, 0.0, -1.0, 0.0]
 
     # Calculate statistics:
-    # baseline = mean of points before time_zero_index (if any), else first point
-    if time_zero_index - pts > 0:
-        baseline = np.mean(y[:(time_zero_index - 300)])
-        snr[1] = np.std(y[:(time_zero_index - 300)])
-        snr[0] = ymax - baseline
-        if snr[1] != 0:
-            snr[2] = snr[0] / snr[1]
+    # baseline = mean of points before tzero_index (if any), else first point
+    if tzero_index - pts > 0:
+        _baseline = np.mean(y[:(tzero_index - 300)])
+        _snr[1] = np.std(y[:(tzero_index - 300)])
+        _snr[0] = ymax - _baseline
+        if _snr[1] != 0:
+            _snr[2] = _snr[0] / _snr[1]
         if conc != 0:
-            snr[3] = snr[0] / conc * 1e3
+            _snr[3] = _snr[0] / conc * 1e3
     else:
-        baseline = y[0]
-    
+        _baseline = y[0]
+
     # Print statistics
     if print_statistics:
         if main_data:
@@ -1027,39 +1050,40 @@ def normalize_before_fitting(y, time_zero_index, norm = None, time_data = None, 
             print("--------------")
             print("Statistics of IRF/baseline:")
         print(f"Maxvalue = {ymax:.5e}")
-        print(f"Mean of baseline = {baseline:.5e}")
-        print(f"Signal amplitude = {snr[0]:.5e}")
-        print(f"Noise (std dev) = {snr[1]:.5e}")
-        if snr[2] == -1.0:
+        print(f"Mean of baseline = {_baseline:.5e}")
+        print(f"Signal amplitude = {_snr[0]:.5e}")
+        print(f"Noise (std dev) = {_snr[1]:.5e}")
+        if _snr[2] == -1.0:
             print(f"{Colors.WARNING}!Warning: Not enough points before time zero to calculate SNR.{Colors.END}")
         else:
-            print(f"SNR = {snr[2]:.4f}")
-        if snr[3] != 0.0:
-            print(f"Amplitude/Concentration = {snr[3]:.5e} a.u./M")
+            print(f"SNR = {_snr[2]:.4f}")
+        if _snr[3] != 0.0:
+            print(f"Amplitude/Concentration = {_snr[3]:.5e} a.u./M")
 
-    tmp = y - baseline
+    tmp = y - _baseline
 
     if norm == 0:
-        intensity_fit = y.copy()
-        return intensity_fit, baseline, scale, snr
-    elif norm == 1:
-        intensity_fit = tmp
+        _intensity_fit = y.copy()
+        return _intensity_fit, _baseline, _scale, _snr
+    if norm == 1:
+        _intensity_fit = tmp
     elif norm == 2:
-        scale = np.max(np.abs(tmp))
-        if scale == 0 or np.isnan(scale):
-            scale = 1.0
-        intensity_fit = tmp / scale
+        _scale = np.max(np.abs(tmp))
+        if _scale == 0 or np.isnan(_scale):
+            _scale = 1.0
+        _intensity_fit = tmp / _scale
     elif norm == 3:
-        scale = y[time_zero_index] if y[time_zero_index] != 0 else 1.0
-        intensity_fit = y / scale
+        _scale = y[tzero_index] if y[tzero_index] != 0 else 1.0
+        _intensity_fit = y / _scale
     else:
-        intensity_fit = y.copy()
-        baseline = 0.0
-        scale = 1.0
+        _intensity_fit = y.copy()
+        _baseline = 0.0
+        _scale = 1.0
 
-    return intensity_fit, baseline, scale, snr
+    return _intensity_fit, _baseline, _scale, _snr
 
-def generate_weight(time_data, start_index, weight_value=None, after=None):
+def generate_weight(tdata, start_index, weight_value=None, after=None):
+    """Read weighting setting"""
     global WEIGHTING_FOR_FIT
     if weight_value is None:
         weight_value = WEIGHT
@@ -1069,32 +1093,34 @@ def generate_weight(time_data, start_index, weight_value=None, after=None):
         WEIGHTING_FOR_FIT = False
     if not WEIGHTING_FOR_FIT:
         return None
-    w = np.ones_like(time_data[start_index:])
-    w[time_data[start_index:] > after] = weight_value
+    w = np.ones_like(tdata[start_index:])
+    w[tdata[start_index:] > after] = weight_value
     return w
 
-def generate_initial_guess(t, y, fit_func, zero_index=0, baseline=0.0, scale=1.0, baseline_var=False, reconv=False):
+def generate_initial_guess(t, y, fit_func, zero_index=0,
+                           _baseline=0.0, _scale=1.0, baseline_var=False, reconv=False):
+    """Generate initial guess, bounds, and value fixing of fitting parameters"""
     global ENABLE_CUSTOM_INITIAL_GUESS, CUSTOM_INITIAL_GUESS
     global UPPER_BOUND, LOWER_BOUND, FIX_VALUE
-    
+
     # Calculate basic statistics
     intensity_max = np.max(np.abs(y))
     intensity_max_idx = np.argmax(y)
-    
+
     # Generate initial guess based on fitting function
     if fit_func == linear:
-        initial_guess = [
+        _initial_guess = [
             y[zero_index], # y0: guess the offset is the first data point
             (y[-1] - y[zero_index]) / (t[-1] - t[zero_index]) # m: slope
         ]
     elif fit_func == exp_decay:
-        initial_guess = [
+        _initial_guess = [
             y[-1], # y0: guess the offset is the last data point
             y[zero_index] - y[-1], # A: guess amplitude is the total drop
             (t[-1] - t[zero_index]) / 2 # tau: guess lifetime is half the time range
         ]
     elif fit_func == exp_2decay:
-        initial_guess = [
+        _initial_guess = [
             y[-1], # y0
             (y[zero_index] - y[-1]) * 0.6, # A1
             (y[zero_index] - y[-1]) * 0.3, # A2
@@ -1102,7 +1128,7 @@ def generate_initial_guess(t, y, fit_func, zero_index=0, baseline=0.0, scale=1.0
             (t[-1] - t[zero_index]) / 1.5 # tau2
         ]
     elif fit_func == exp_3decay:
-        initial_guess = [
+        _initial_guess = [
             y[-1], # y0
             (y[zero_index] - y[-1]) * 0.5, # A1
             (y[zero_index] - y[-1]) * 0.3, # A2
@@ -1112,20 +1138,20 @@ def generate_initial_guess(t, y, fit_func, zero_index=0, baseline=0.0, scale=1.0
             (t[-1] - t[zero_index]) / 1 # tau3
         ]
     elif fit_func == secondary_decay:
-        initial_guess = [
+        _initial_guess = [
             y[-1], # y0
             y[zero_index] - y[-1],  # k: small rate constant
             1 / intensity_max # r0: initial reciprocal concentration
         ]
     elif fit_func == primary_secondary_decay:
-        initial_guess = [
+        _initial_guess = [
             y[-1], # y0
             (y[zero_index] - y[-1]) * 0.5,               # k1
             1.0,              # k2
             intensity_max                # const
         ]
     elif fit_func == primary_secondary_seperate:
-        initial_guess = [
+        _initial_guess = [
             y[-1], # y0: guess the offset is the last data point
             0.5 * (y[zero_index] - y[-1]), # A: guess amplitude is the total drop
             2 / (t[-1] - t[zero_index]), # tau: guess lifetime is half the time range
@@ -1133,20 +1159,20 @@ def generate_initial_guess(t, y, fit_func, zero_index=0, baseline=0.0, scale=1.0
             1 / intensity_max
         ]
     elif fit_func == primary_rise:
-        initial_guess = [
+        _initial_guess = [
             y[zero_index], # y0
             y[-1] - y[zero_index], # A
             100 / (t[-1] - t[zero_index]) # k
         ]
     elif fit_func == primary_rise_linear_offset:
-        initial_guess = [
+        _initial_guess = [
             y[zero_index], # y0
             y[-1] - y[zero_index], # A
             100 / (t[-1] - t[zero_index]), # k
             0.0 # B
         ]
     elif fit_func == primary_rise_double_offset:
-        initial_guess = [
+        _initial_guess = [
             y[zero_index], # y0
             y[-1] - y[zero_index], # A
             100 / (t[-1] - t[zero_index]), # k
@@ -1154,7 +1180,7 @@ def generate_initial_guess(t, y, fit_func, zero_index=0, baseline=0.0, scale=1.0
             0.0  # t0
         ]
     elif fit_func == primary_rise_triple_offset:
-        initial_guess = [
+        _initial_guess = [
             y[zero_index], # y0
             y[-1] - y[zero_index], # A
             100 / (t[-1] - t[zero_index]), # k
@@ -1163,7 +1189,7 @@ def generate_initial_guess(t, y, fit_func, zero_index=0, baseline=0.0, scale=1.0
             0.0  # t0
         ]
     elif fit_func == double_primary_rise:
-        initial_guess = [
+        _initial_guess = [
             y[zero_index], # y0
             y[-1] - y[zero_index], # A1
             100 / (t[-1] - t[zero_index]), # k1
@@ -1171,7 +1197,7 @@ def generate_initial_guess(t, y, fit_func, zero_index=0, baseline=0.0, scale=1.0
             10 / (t[-1] - t[zero_index]) # k2
         ]
     elif fit_func == double_primary_rise_linear_offset:
-        initial_guess = [
+        _initial_guess = [
             y[zero_index], # y0
             y[-1] - y[zero_index], # A1
             100 / (t[-1] - t[zero_index]), # k1
@@ -1180,21 +1206,21 @@ def generate_initial_guess(t, y, fit_func, zero_index=0, baseline=0.0, scale=1.0
             0.0 # B
         ]
     elif fit_func == primary_cascade:
-        initial_guess = [
+        _initial_guess = [
             y[zero_index], # y0
             y[-1] - y[zero_index], # A
             100 / (t[-1] - t[zero_index]), # k1
             1 / (t[-1] - t[zero_index]) # k2
         ]
     elif fit_func == gaussian:
-        initial_guess = [
+        _initial_guess = [
             0.0, # y0
             intensity_max, # A
             t[intensity_max_idx], # t0
             1.0 # sigma
         ]
     elif fit_func == primary_rise_with_gaussian:
-        initial_guess = [
+        _initial_guess = [
             0.0, # y0
             intensity_max, # A
             100 / (t[-1] - t[zero_index]), # k
@@ -1204,36 +1230,35 @@ def generate_initial_guess(t, y, fit_func, zero_index=0, baseline=0.0, scale=1.0
             0.0, # C
         ]
     else:
-        initial_guess = []
+        _initial_guess = []
         print(f"{Colors.WARNING}!Warning: Unknown fitting function. Cannot perform fitting.{Colors.END}")
 
-    if baseline_variable: # Add C parameter for baseline variation
-        initial_guess.append(0.0) # C
+    if BVAR: # Add C parameter for _baseline variation
+        _initial_guess.append(0.0) # C
     if reconv: # Add tz parameter for reconvolution fitting
-        initial_guess.append(0.0) # tz
-    
+        _initial_guess.append(0.0) # tz
+
     # Apply custom initial guess if enabled
     if ENABLE_CUSTOM_INITIAL_GUESS and CUSTOM_INITIAL_GUESS:
-        for i in range(min(len(CUSTOM_INITIAL_GUESS), len(initial_guess))):
-            if CUSTOM_INITIAL_GUESS[i] is not None:    
-                initial_guess[i] = CUSTOM_INITIAL_GUESS[i]
-        print(f"Using custom initial guess:", initial_guess)
+        for i in range(min(len(CUSTOM_INITIAL_GUESS), len(_initial_guess))):
+            if CUSTOM_INITIAL_GUESS[i] is not None:
+                _initial_guess[i] = CUSTOM_INITIAL_GUESS[i]
+        print("Using custom initial guess:", _initial_guess)
     else:
-        print(f"Generated initial guess:", initial_guess)
-    
+        print("Generated initial guess:", _initial_guess)
+
     # Special handling for primary_secondary_decay to promote convergence
     if fit_func == primary_secondary_decay:
-        initial_guess[3] = - np.log(initial_guess[1] / initial_guess[3] + 2*initial_guess[2]) / initial_guess[1]
-    
-    # Convert y0 to normalized units 
-        initial_guess[0] = (initial_guess[0] - baseline) / scale
+        _initial_guess[3] = - np.log(_initial_guess[1] / _initial_guess[3] + 2*_initial_guess[2]) / _initial_guess[1]
+
+    # Convert y0 to normalized units
+        _initial_guess[0] = (_initial_guess[0] - _baseline) / _scale
     # --- Build default bounds ---
-    n = len(initial_guess)
     # Use large finite bounds by default
     huge = 1e14
     tiny = 1e-12
-    lower = np.full(n, -huge, dtype=float)
-    upper = np.full(n, huge, dtype=float)
+    lower = np.full(len(_initial_guess), -huge, dtype=float)
+    upper = np.full(len(_initial_guess), huge, dtype=float)
 
     # Set some reasonable per-model bounds (e.g. lifetimes/rates should be positive)
     if fit_func == exp_decay:
@@ -1306,37 +1331,37 @@ def generate_initial_guess(t, y, fit_func, zero_index=0, baseline=0.0, scale=1.0
     # If JSON provided LOWER_BOUND/UPPER_BOUND, use them to override generated bounds
     if LOWER_BOUND:
         for i in range(min(len(LOWER_BOUND), len(lower))):
-            if LOWER_BOUND[i] is not None:    
+            if LOWER_BOUND[i] is not None:
                 lower[i] = LOWER_BOUND[i]
         print("Using custom lower bound:", lower)
     if UPPER_BOUND:
         for i in range(min(len(UPPER_BOUND), len(upper))):
-            if UPPER_BOUND[i] is not None:    
+            if UPPER_BOUND[i] is not None:
                 upper[i] = UPPER_BOUND[i]
         print("Using custom upper bound:", upper)
 
-    # If FIX_VALUE is specified, override initial_guess, the upper limit, and the lower limit, 
+    # If FIX_VALUE is specified, override _initial_guess, the upper limit, and the lower limit,
     # # to fix the corresponding parameter when fitting.
     if FIX_VALUE:
-        for i in range(min(len(initial_guess), len(FIX_VALUE))):
+        for i in range(min(len(_initial_guess), len(FIX_VALUE))):
             if FIX_VALUE[i] is not None:
-                initial_guess[i] = FIX_VALUE[i]
-                # Add a tiny value, to ensure the upper bound is strictly greater than the lower bound
+                _initial_guess[i] = FIX_VALUE[i]
+                # Add a tiny value, to ensure the upper bound > the lower bound
                 upper[i] = FIX_VALUE[i] + tiny
                 lower[i] = FIX_VALUE[i] - tiny
                 print(f"Parameter {i+1} is fixed ({FIX_VALUE[i]}).")
     else:
-        FIX_VALUE = [None] * len(initial_guess)
+        FIX_VALUE = [None] * len(_initial_guess)
 
-    bounds = (lower.tolist(), upper.tolist())
+    _bounds = (lower.tolist(), upper.tolist())
 
-    return initial_guess, bounds
+    return _initial_guess, _bounds
 
 def evaluate_fitting(y_true, y_pred, k=0):
-    """Evaluate the quality of fitting.
-    Returns a tuple: (residuals, R^2, adjusted R^2, chi_squared, RMSE, number of effective points)."""
-    residuals = y_true - y_pred
-    ss_res = np.sum(residuals**2)
+    """Evaluate the quality of fitting. Returns a tuple: 
+    (residuals, R^2, adjusted R^2, chi_squared, RMSE, number of effective points)."""
+    residual = y_true - y_pred
+    ss_res = np.sum(residual**2)
     ss_tot = np.sum((y_true - np.mean(y_true))**2)
     rmse = np.sqrt(ss_res / len(y_true))
     r_squared = 1 - (ss_res / ss_tot)
@@ -1345,22 +1370,23 @@ def evaluate_fitting(y_true, y_pred, k=0):
         adj_r_squared = 1 - (1 - r_squared) * (len(y_true) - 1) / (len(y_true) - k - 1)
     chi_squared = 999999999
     try:
-        chi_squared = np.sum((residuals)**2 / (y_true + 1e-12)) # Add small value to avoid division by zero
+         # Add small value to avoid division by zero
+        chi_squared = np.sum((residual)**2 / (y_true + 1e-12))
     except ZeroDivisionError:
-        print(f"{Colors.WARNING}!Warning: Zero division error in chi-squared calculation.{Colors.END}")   
-    return residuals, r_squared, adj_r_squared, chi_squared, rmse, len(y_true)
+        print(f"{Colors.WARNING}!Warning: 0-division error in chi-squared calculation.{Colors.END}")
+    return residual, r_squared, adj_r_squared, chi_squared, rmse, len(y_true)
 
 def generate_fitting_info(_popt, _res, fit_func, perr=None, baseline_var=False, reconv=False):
+    """Print all fitted values, and evaluation of the model.
+    The returning string will be passed to the textbox in the figure."""
     # Print fitted values
     print("All fitted values:", _popt)
     print("Number of points:", _res[-1])
-
     # Fill error values if not provided
     if perr is None:
         perr = [np.nan] * len(_popt)
     else:
         perr = list(perr)
-    
     # Scale up time-related parameters if they are very small
     idx_to_scale_up = []
     for i, x in enumerate(_popt):
@@ -1368,10 +1394,9 @@ def generate_fitting_info(_popt, _res, fit_func, perr=None, baseline_var=False, 
             _popt[i] = x * 1e3
             try:
                 perr[i] = perr[i] * 1e3
-            except Exception:
+            except (ValueError, TypeError):
                 perr[i] = perr[i]
             idx_to_scale_up.append(i)
-
     # For fixed values, set the error to NaN
     if FIX_VALUE:
         for i in range(min(len(_popt), len(FIX_VALUE))):
@@ -1382,7 +1407,6 @@ def generate_fitting_info(_popt, _res, fit_func, perr=None, baseline_var=False, 
     info_list = [] # [Symbol_string, order, other_info_string]
     info_sequence = [] # Determine the order of displaying info
     info_text = ''
-    
     # Determine info_list and info_sequence based on fit_func
     if fit_func == linear:
         info_list = [["$y_0$",0,  ""],
@@ -1515,7 +1539,7 @@ def generate_fitting_info(_popt, _res, fit_func, perr=None, baseline_var=False, 
 
     # Generate info lines
     info_lines = [f'Func: \"{info_func_name}\"']
-    for i in info_sequence: 
+    for i in info_sequence:
         l = 1 if i in idx_to_scale_up else 0
         unit = parse_order_to_unit(info_list[i][1], levelup = l)
         val = popt[i]
@@ -1534,7 +1558,7 @@ def generate_fitting_info(_popt, _res, fit_func, perr=None, baseline_var=False, 
     # Then print the part shown in textbox
     info_text = "\n".join(info_lines)
     print(f"{Colors.BLUE}{info_text}{Colors.END}")
-    
+
     # The following part is shown in console but not in textbox:
     info_lines_extra = [f"Adjusted $R^2$= {_res[2]:.4f}",
                         f"$χ^2$ = {_res[3]:.4e}",
@@ -1550,7 +1574,8 @@ def generate_file_name(copy = None, mode = 0):
     '''Generate file name of saved figs, then copy it to the clipboard.'''
     if copy is None:
         copy = COPY_FILENAME_TO_CLIPBOARD
-    # If FILENAME specified, use it directly. Otherwise, generate a filename based on the current configuration.
+    # If FILENAME specified, use it directly.
+    # Otherwise, generate a filename based on the current configuration.
     if FILENAME:
         filename = FILENAME
     # mode = 0: the same filename as the json file
@@ -1560,8 +1585,8 @@ def generate_file_name(copy = None, mode = 0):
             filename = filename.rsplit('/', 1)[-1]
     # mode = 1: a descriptive filename based on the current configuration
     elif mode == 1:
-        filename = RUN_DIR + '_' + TYPE + '_' + '_'.join(label_list) + '_' + TITLE0.replace(' ', '_')
-        if TYPE == "KinAbs" or TYPE == "KA":
+        filename = RUN_DIR + '_' + TYPE + '_'.join(label_list) + '_' + TITLE0.replace(' ', '_')
+        if TYPE in ("KinAbs", "KA"):
             filename += f'_{WAVELENGTH_DETECTED}nm'
             if DO_FITTING:
                 filename += f'_{FIT_FUNCTION}'
@@ -1585,6 +1610,7 @@ def generate_file_name(copy = None, mode = 0):
     return filename
 
 def show_help():
+    """Print all input options in the interaction phase"""
     print("""All options:
 [n]: Choose a new .json file, re-initiallize and plot
 [r]: Replot using the current configuration
@@ -1602,44 +1628,44 @@ while LOOP:
         pass
 #region ---- TA spectrum plotting ---------------------
     elif plot_mode == 0:
+        # Create figure
+        pp.figure(figsize=FIGSIZE, constrained_layout=True)
+
         # Set up the plotting range. REMIND: this may give a redundant blank picture
         if XMIN or XMAX:
             pp.xlim(left=XMIN, right=XMAX)
         if YMIN or YMAX:
             pp.ylim(bottom=YMIN, top=YMAX)
 
-        # Create figure
-        pp.figure(figsize=FIGSIZE, constrained_layout=True)
-
         # Extract data and build data arrays
         data_arrays = []
-        for i, entry in enumerate(RUN_LIST):
-            data = preprocess_data(i, entry)
-            data_arrays.append(data)
+        for n, ent in enumerate(RUN_LIST):
+            exp_data = preprocess_data(n, ent)
+            data_arrays.append(exp_data)
+            print(f"------Sucessfully read spectrum {n+1}: Run {ent}------")
 
         # Now plot each prepared data array
-        for i, data in enumerate(data_arrays):
-            print(f"------Sucessfully read spectrum {i+1}: Run {entry}------")
-            if data.size == 0:
+        for n, _data in enumerate(data_arrays):
+            if _data.size == 0:
                 continue
             # Plotting
             plot_kwargs = {'linewidth': LINEWIDTH}
             if label_list:
-                plot_kwargs['label'] = label_list[i]
+                plot_kwargs['label'] = label_list[n]
             if COLOR_LIST:
-                plot_kwargs['color'] = COLOR_LIST[i % len(COLOR_LIST)]
-            pp.plot(data[:,0], data[:,1], **plot_kwargs)
+                plot_kwargs['color'] = COLOR_LIST[n % len(COLOR_LIST)]
+            pp.plot(_data[:,0], _data[:,1], **plot_kwargs)
 
         # Finalize the plot
         pp.ylabel(YLABEL)
         pp.xlabel(XLABEL)
-        
+
         # Constrain the plot by X/YMIN, X/YMAX
         if XMIN or XMAX:
             pp.xlim(left=XMIN, right=XMAX)
         else:
             pp.autoscale(enable = True, axis = 'x', tight = True)
-        
+
         if YMIN or YMAX:
             pp.ylim(bottom=YMIN, top=YMAX)
         else:
@@ -1648,22 +1674,23 @@ while LOOP:
             pp.legend(loc = "upper right")
 
         # Add title. EXAMINE it carefully!!!
-        TITLE = rf'{type_title} spectrum of {TITLE0}' 
+        TITLE = rf'{type_title} spectrum of {TITLE0}'
         pp.title(TITLE, fontsize = TITLE_FONTSIZE, fontweight = 'bold')
 
         # If there are at least two curves, compute their intersections and mark them
         if FIND_INTERSECTIONS and len(data_arrays) >= 2:
             print("Intersections:")
-            x1, y1 = data_arrays[0][:,0], data_arrays[0][:,1]
-            x2, y2 = data_arrays[1][:,0], data_arrays[1][:,1]
-            intersections = find_curve_intersections(x1, y1, x2, y2, abs_tol=INTERSECTION_ABS_TOL)
+            X1, Y1 = data_arrays[0][:,0], data_arrays[0][:,1]
+            X2, Y2 = data_arrays[1][:,0], data_arrays[1][:,1]
+            intersections = find_curve_intersections(X1, Y1, X2, Y2, abs_tol=INTERSECTION_ABS_TOL)
             num_intersections = len(intersections)
             if intersections:
                 xs = [p[0] for p in intersections]
                 ys = [p[1] for p in intersections]
                 if SHOW_INTERSECTIONS:
                     # Hollow circle markers: unfilled face, visible edge
-                    pp.scatter(xs, ys, marker='o', facecolors='none', edgecolors='k', s=80, linewidths=1.5, zorder=10, label='_nolegend_')
+                    pp.scatter(xs, ys, marker='o', facecolors='none',
+                               edgecolors='k', s=80, linewidths=1.5, zorder=10, label='_nolegend_')
                 print(f'{num_intersections} intersection(s) between first two curves:')
                 for xi, yi in intersections:
                     print(f'  x = {xi:.6f}, y = {yi:.6e}')
@@ -1676,11 +1703,11 @@ while LOOP:
 
     elif plot_mode == 1:
         # You can change "if RUN_LIST" to a loop, if you have multiple curves to fit.
-        for j, entry in enumerate(RUN_LIST):
-            discard_fitting = False
+        for j, ent in enumerate(RUN_LIST):
+            DISCARD_FITTING = False
             # Create subplots
             fig, (ax1, ax2) = pp.subplots(
-                2, 1, 
+                2, 1,
                 figsize=FIGSIZE,
                 constrained_layout=True,
                 sharex=True,  # Both subplots will share the same x-axis
@@ -1693,41 +1720,45 @@ while LOOP:
             if YMIN or YMAX:
                 ax1.set_ylim(bottom=YMIN, top=YMAX)
                 ax2.set_ylim(bottom=YMIN, top=YMAX)
-            
+
             fig.subplots_adjust(hspace=0.05) # Remove space between plots
             # Ready for data (!!Only pick the first data!!)
-            data = preprocess_data(j, entry)
-            print(f"------Sucessfully read file {j+1}: Run {entry}------")
-            time_data = data[:,0]
-            intensity_data = data[:,1]
+            exp_data = preprocess_data(j, ent)
+            print(f"------Sucessfully read file {j+1}: Run {ent}------")
+            time_data = exp_data[:,0]
+            intensity_data = exp_data[:,1]
             # Keep originals for plotting/metrics
             intensity_orig = intensity_data.copy()
             # This finds the index of the time value closest to zero
             time_zero_index = np.argmin(np.abs(time_data))
             # Normalization if needed
-            intensity_fit, baseline, scale, snr = normalize_before_fitting(intensity_data, time_zero_index, conc=CONCENTRATION_LIST[j],
-                                                                           print_statistics=True, time_data=time_data)
+            intensity_fit, baseline, scale, snr = normalize_before_fitting(intensity_data,
+                                            time_zero_index, conc=CONCENTRATION_LIST[j],
+                                                print_statistics=True, tdata=time_data)
             # Pick the fitting function
             try:
                 fit_function = FIT_MODELS[FIT_FUNCTION.lower()]
             except KeyError:
                 print(f"{Colors.WARNING}!Warning: Fit function '{FIT_FUNCTION}' not recognized. Defaulting to 'exp_decay'.{Colors.END}")
                 fit_function = exp_decay
-            
-            baseline_variable = False
-            baseline_coeff = 0.0
+
+            BVAR = False
+            BCOEFF = 0.0
             # If BASELINE is specified:
             if BASELINE_ID[j] > 0:
                 # Read baseline data and normalize the integral to 1
                 bdata = preprocess_data(j, BASELINE_ID[j])
-                bdata_normalized, _, _, bdata_snr = normalize_before_fitting(bdata[:,1], 800, norm=1, main_data = False,
-                                                                             time_data=bdata[:,0], print_statistics=config.get("SHOW_ALL_STATISTICS", False))
-                baseline_interp = interp1d(bdata[:,0], bdata_normalized, kind='cubic', fill_value='extrapolate', assume_sorted=False)
-                baseline_variable = True
+                bdata_normalized, _,_,_ = normalize_before_fitting(bdata[:,1], 800,
+                                        norm=1, main_data=False, tdata=bdata[:,0],
+                        print_statistics=config.get("SHOW_ALL_STATISTICS", False))
+
+                baseline_interp = interp1d(bdata[:,0], bdata_normalized, kind='cubic',
+                                           fill_value='extrapolate', assume_sorted=False)
+                BVAR = True
                 print(f"Baseline data loaded for Run{RUN_LIST[j]}.")
             else:
-                baseline_interp = interp1d(time_data, np.zeros_like(time_data), kind='cubic', fill_value='extrapolate', assume_sorted=False)
-                baseline_intensity_fit = None
+                baseline_interp = interp1d(time_data, np.zeros_like(time_data), kind='cubic',
+                                           fill_value='extrapolate',assume_sorted=False)
 
             # If IRF is specified, use convolution fitting functions
             if IRF_ID[j] > 0:
@@ -1735,8 +1766,10 @@ while LOOP:
                 irf_data = preprocess_data(j, IRF_ID[j])
                 irf_time_data = irf_data[:,0]
                 irf_intensity_data = irf_data[:,1]
-                irf_intensity_fit, irf_baseline, irf_scale, irf_snr = normalize_before_fitting(irf_intensity_data, 800, norm=1, main_data = False,
-                                                                                               time_data=irf_time_data, print_statistics=config.get("SHOW_ALL_STATISTICS", False))
+                irf_intensity_fit, _,_,_ = normalize_before_fitting(irf_intensity_data, 800,
+                                            norm=1, main_data=False, tdata=irf_time_data,
+                                print_statistics=config.get("SHOW_ALL_STATISTICS", False))
+
                 print(f"IRF data loaded for Run{RUN_LIST[j]}.")
             else:
                 RECONV_TZ = False
@@ -1745,15 +1778,17 @@ while LOOP:
             while RETRY_FIT_IF_FAIL:
                 try:
                     print(f"------Starting fitting for Run{RUN_LIST[j]}------")
-                    print("Fit function:", fit_function.__name__, " (reconvolved)" if IRF_ID[j] > 0 else "")
+                    print("Fit function:", fit_function.__name__,
+                          "(reconvolved)" if IRF_ID[j] > 0 else "")
                     # Generate initial guess and bounds using the dedicated function
-                    initial_guess, bounds = generate_initial_guess(time_data, intensity_data, fit_function, time_zero_index,
-                                                        baseline=baseline, scale=scale, baseline_var=baseline_variable, reconv=RECONV_TZ)
+                    initial_guess, bounds = generate_initial_guess(time_data, intensity_data,
+                            fit_function, time_zero_index, _baseline=baseline, _scale=scale,
+                                                        baseline_var=BVAR, reconv=RECONV_TZ)
                     # Generate weights
-                    weights = generate_weight(time_data, time_zero_index)  
+                    weights = generate_weight(time_data, time_zero_index)
 
                     #region --- Use curve_fit and generate a smooth curve for the fit ---
-                    
+
                     # Generate fine time points for smooth fit curve
                     tnum = len(time_data[time_zero_index:])
                     t_fit = np.linspace(time_data[time_zero_index], time_data.max(), tnum)
@@ -1761,27 +1796,29 @@ while LOOP:
                     orig_fit_function = fit_function
 
                     # Applying variable C into fit_function if baseline data is specified
-                    if baseline_variable:
+                    if BVAR:
                         def combined_model(t, *params):
+                            '''Construct function: f(t) + C*b(t)'''
                             core_params = params[:-1]
-                            C = params[-1]
-                            return orig_fit_function(t, *core_params) + C * baseline_interp(t)
+                            coeff = params[-1]
+                            return orig_fit_function(t, *core_params) + coeff * baseline_interp(t) # pylint: disable=cell-var-from-loop
                         fit_function = combined_model
-                    
+
                     # Applying reconvolution fit if IRF is specified
                     if IRF_ID[j] > 0:
                         rfunc = lambda t, *params: reconvolve(
-                                                func=fit_function,
+                                                func=fit_function, # pylint: disable=cell-var-from-loop
                                                 params=params[:-1] if RECONV_TZ else params,
                                                 t=t,
-                                                irf_t=irf_time_data,
-                                                irf_y=irf_intensity_fit,
-                                                tz=(params[-1] if RECONV_TZ else 0.0)
+                                                irf_t=irf_time_data, # pylint: disable=cell-var-from-loop
+                                                irf_y=irf_intensity_fit, # pylint: disable=cell-var-from-loop
+                                                tzero=(params[-1] if RECONV_TZ else 0.0)
                                             )
                         #ax1.plot(irf_time_data, irf_intensity_fit, color="#00aa00")
-                        popt, pcov = curve_fit(
+                        popt, pcov = curve_fit(# pylint: disable=unbalanced-tuple-unpacking
                                             rfunc,
-                                            time_data, intensity_fit,
+                                            time_data,
+                                            intensity_fit,
                                             p0=initial_guess,
                                             bounds=bounds,
                                             sigma=weights if WEIGHTING_FOR_FIT else None,
@@ -1789,23 +1826,25 @@ while LOOP:
                                             maxfev=5000,
                                             )
                         tnum = len(time_data[0:])
-                        baseline_coeff = popt[-2] if RECONV_TZ and baseline_variable else 0.0
+                        BCOEFF = popt[-2] if RECONV_TZ and BVAR else 0.0
                         tz = popt[-1] if RECONV_TZ else 0.0
                         t_fit = np.linspace(time_data[0], time_data.max(), tnum)
                         y_fit = rfunc(t_fit, *popt)[:-dpwr]
-                        y_fit_noreconv = fit_function(t_fit[0:], *popt[:-1 if RECONV_TZ else len(popt)])[:-dpwr] * scale + baseline
-                        y_fit_noreconv[:np.argmin(np.abs(time_data - tz))] = 0.0
-                        res = evaluate_fitting(intensity_orig[0:], rfunc(time_data[0:], *popt) * scale + baseline, k=len(popt))
-                        #residuals = intensity_orig[0:] - (rfunc(time_data[0:], *popt) * scale + baseline)
+                        Y_FIT_NORECONV = fit_function(t_fit[0:], *popt[:-1 if RECONV_TZ else len(popt)])[:-dpwr] * scale + baseline
+                        Y_FIT_NORECONV[:np.argmin(np.abs(time_data - tz))] = 0.0
+                        res = evaluate_fitting(intensity_orig[0:],
+                                               rfunc(time_data[0:], *popt)*scale+baseline,
+                                               k=len(popt))
                         residuals = res[0][:-dpwr]
                         intensity_orig = intensity_orig[:-dpwr]
                         time_data = time_data[:-dpwr]
                         t_fit = t_fit[:-dpwr]
                         time_zero_index = 0
                     else:
-                        popt, pcov = curve_fit(
+                        popt, pcov = curve_fit(# pylint: disable=unbalanced-tuple-unpacking
                                             fit_function,
-                                            time_data[time_zero_index:], intensity_fit[time_zero_index:],
+                                            time_data[time_zero_index:],
+                                            intensity_fit[time_zero_index:],
                                             p0=initial_guess,
                                             bounds=bounds,
                                             sigma=weights if WEIGHTING_FOR_FIT else None,
@@ -1813,30 +1852,31 @@ while LOOP:
                                             maxfev=5000
                                             )
                         y_fit = fit_function(t_fit, *popt)
-                        y_fit_noreconv = None
-                        res = evaluate_fitting(intensity_orig[time_zero_index:], fit_function(t_fit, *popt) * scale + baseline, k=len(popt))
-                        #residuals = intensity_orig[time_zero_index:] - (fit_function(time_data[time_zero_index:], *popt) * scale + baseline)
+                        Y_FIT_NORECONV = None
+                        res = evaluate_fitting(intensity_orig[time_zero_index:],
+                                               fit_function(t_fit, *popt)*scale + baseline,
+                                               k=len(popt))
                         residuals = res[0]
-                        
-                    baseline_coeff = popt[-1] if (not baseline_coeff) and baseline_variable else baseline_coeff    
+
+                    BCOEFF = popt[-1] if (not BCOEFF) and BVAR else BCOEFF
                     # y_fit currently is in normalized units -> convert to original units
                     y_fit_plot = y_fit * scale + baseline
                     # Calculate errors:
-                    perr = np.array([np.nan] * len(popt))
+                    Perr = np.array([np.nan] * len(popt))
                     if ERROR_ANALYSIS and (pcov is not None):
                         try:
                             with np.errstate(invalid='ignore'):
-                                perr = np.sqrt(np.diag(pcov))
-                        # If covariance cannot be estimated, set perr to NaN
-                            if not np.isfinite(perr).all():
-                                perr = np.array([np.nan] * len(popt))
-                        except Exception:
+                                Perr = np.sqrt(np.diag(pcov))
+                        # If covariance cannot be estimated, set Perr to NaN
+                            if not np.isfinite(Perr).all():
+                                Perr = np.array([np.nan] * len(popt))
+                        except (ValueError, RuntimeError, FloatingPointError):
                             pass
-                    
+
                     # Print the fitted results
                     print(f"------Fit successful for Run{RUN_LIST[j]}------")
-                    fit_info_text = generate_fitting_info(popt, res, fit_func = orig_fit_function,
-                                                          perr=perr, reconv=RECONV_TZ, baseline_var=baseline_variable)
+                    FIT_INFO_TEXT = generate_fitting_info(popt, res, fit_func=orig_fit_function,
+                                                perr=Perr, reconv=RECONV_TZ, baseline_var=BVAR)
                     #endregion
 
                     #region --- Check R² value for fit quality ---
@@ -1848,8 +1888,8 @@ while LOOP:
                                 # Adjust initial guesses slightly for retry
                                 print("Enter new initial guesses. eg: xx yy zz")
                                 print(f"Current initial guess: {initial_guess}")
-                                input_initial_guess = input().strip()
-                                CUSTOM_INITIAL_GUESS = [float(x) for x in input_initial_guess.split()]
+                                inp_initial_guess = input().strip()
+                                CUSTOM_INITIAL_GUESS = [float(x) for x in inp_initial_guess.split()]
                                 ENABLE_CUSTOM_INITIAL_GUESS = True
                                 continue
                     #endregion
@@ -1862,39 +1902,39 @@ while LOOP:
                     if RETRY_FIT_IF_FAIL:
                         retry = input("Retry with adjusted initial guesses? y/n: ").lower()
                         if retry != 'y':
-                            discard_fitting = True
+                            DISCARD_FITTING = True
                             break
-                        else:
-                            # Adjust initial guesses slightly for retry
-                            print("Enter new initial guesses. eg: xx yy zz")
-                            print(f"Current initial guess: {initial_guess}")
-                            input_initial_guess = input().strip()
-                            CUSTOM_INITIAL_GUESS = [float(x) for x in input_initial_guess.split()]
-                            ENABLE_CUSTOM_INITIAL_GUESS = True
-            
+                        # Adjust initial guesses slightly for retry
+                        print("Enter new initial guesses. eg: xx yy zz")
+                        print(f"Current initial guess: {initial_guess}")
+                        input_initial_guess = input().strip()
+                        CUSTOM_INITIAL_GUESS = [float(x) for x in input_initial_guess.split()]
+                        ENABLE_CUSTOM_INITIAL_GUESS = True
+
             #region --- Finalize the plot -----------------------------
 
-            if not discard_fitting:
+            if not DISCARD_FITTING:
                 # Plot the raw data points on the top subplot (ax1)
-                ax1.plot(time_data, intensity_orig, 
-                        label='Data (Original)' if baseline_variable else 'Data',
-                        color= "#aaaaaa" if baseline_variable else "#6babd8")
-                
-                # If variant baseline is applied, also plot the baseline-subtracted data for better visualization
-                if baseline_variable:
-                    ax1.plot(time_data, intensity_orig - baseline_coeff * baseline_interp(time_data), 
+                ax1.plot(time_data, intensity_orig,
+                        label='Data (Original)' if BVAR else 'Data',
+                        color= "#aaaaaa" if BVAR else "#6babd8")
+
+                # If variant baseline is applied, also plot the
+                # baseline-subtracted data for better visualization
+                if BVAR:
+                    ax1.plot(time_data, intensity_orig - BCOEFF*baseline_interp(time_data),
                         label='Data (Subtracted)',
                         color="#6babd8")
-                    
+
                 # Plot the fitted curve on ax1
-                ax1.plot(t_fit, y_fit_plot - baseline_coeff * baseline_interp(t_fit), 
-                         color='#0000aa', linestyle='-', 
-                        label=f'Fit')
-                    
-                if y_fit_noreconv is not None:
-                    ax1.plot(t_fit[0:], y_fit_noreconv[0:], color='#aa0000', linestyle='--', 
-                            label=f'Fit (no reconv.)')
-                
+                ax1.plot(t_fit, y_fit_plot - BCOEFF * baseline_interp(t_fit),
+                         color='#0000aa', linestyle='-',
+                        label='Fit')
+
+                if Y_FIT_NORECONV is not None:
+                    ax1.plot(t_fit[0:], Y_FIT_NORECONV[0:], color='#aa0000', linestyle='--',
+                            label='Fit (no reconv.)')
+
                 # Add fitting results into a text box on the diagram ---
                 if SHOW_FITTING_INFO:
                     v = 'bottom'
@@ -1903,16 +1943,18 @@ while LOOP:
                         v = 'top'
                         y_off = 0.95
                     h = 'left' if 'left' in POSITION_OF_FITTING_INFO else 'right'
-                    ax1.text(0.97, y_off, fit_info_text, 
-                            transform=ax1.transAxes, 
+                    ax1.text(0.97, y_off, FIT_INFO_TEXT,
+                            transform=ax1.transAxes,
                             fontsize=12,
-                            verticalalignment=v, 
+                            verticalalignment=v,
                             horizontalalignment=h,
                             bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.7))
-                    
+
                 # Plot residuals on the bottom subplot (ax2)
-                ax2.scatter(time_data[time_zero_index:], residuals, facecolors='none', edgecolors='gray', s=20)
-                ax2.axhline(0, color='black', linestyle='--', linewidth=1) # Add a zero line)
+                ax2.scatter(time_data[time_zero_index:], residuals,
+                            facecolors='none', edgecolors='gray', s=20)
+                # Add a zero line
+                ax2.axhline(0, color='black', linestyle='--', linewidth=1)
 
                 # Set axis limits if specified
                 if XMIN or XMAX:
@@ -1929,19 +1971,19 @@ while LOOP:
                     ax2.set_ylim(-np.max(np.abs(residuals)) * 1.1, np.max(np.abs(residuals)) * 1.1)
 
                 # Set title
-                final_title = rf'{type_title} of {TITLE0}'
+                FINAL_TITLE = rf'{type_title} of {TITLE0}'
                 if WAVELENGTH_DETECTED:
-                    final_title += rf' at {WAVELENGTH_DETECTED} nm'
+                    FINAL_TITLE += rf' at {WAVELENGTH_DETECTED} nm'
                 else:
                     print(f"{Colors.WARNING}!Warning: WAVELENGTH_DETECTED is not set properly.{Colors.END}")
-                
+
                 if ENABLE_LEGEND:
                     ax1.legend(loc="best")
 
                 ax1.set_ylabel(YLABEL)
-                ax1.set_title(final_title, 
+                ax1.set_title(FINAL_TITLE,
                             fontsize = TITLE_FONTSIZE, fontweight='bold')
-                
+
                 # Finalize the bottom subplot (ax2)
                 ax2.set_xlabel(XLABEL)
                 ax2.set_ylabel('Residuals')
@@ -1951,15 +1993,15 @@ while LOOP:
             #endregion --- Finalize the plot -----------------------------
 
     # Generate the filename and copy it to the clipboard.
-    filename = generate_file_name()
-    if plot_mode != -1:    
+    Filename = generate_file_name()
+    if plot_mode != -1:
         pp.show()
     #endregion --- End of Absorption kinetics plotting and fitting ---------------------
 
 #region --- Decide the next action --------------
 
-    interact = True
-    while interact:
+    INTERACT = True
+    while INTERACT:
         ans = input('Please input the next action, type "h" to display all options: ').lower()
         # [n]: Choose a new .json file, re-initiallize and plot.
         if ans == 'n':
@@ -1968,18 +2010,18 @@ while LOOP:
             print('Choosing a new file to plot:')
             config = initialize()
             LOOP = True
-            interact = False
+            INTERACT = False
         # [r]: Replot with the current configuration.
         elif ans == 'r' and plot_mode != -1:
             print('Reload the current configuration.')
             config = initialize(INPUT_JSON_PATH)
             LOOP = True
-            interact = False
+            INTERACT = False
         # [s]: Save the current plot to the working directory.
         elif ans == 's':
             # bug here: saved picture is blank
-            pp.savefig(f'{os.getcwd()}\\{filename}.png', bbox_inches="tight", pad_inches=0.02)
-            print(f'{os.getcwd()}\\{filename}.png is saved.')
+            pp.savefig(f'{os.getcwd()}\\{Filename}.png', bbox_inches="tight", pad_inches=0.02)
+            print(f'{os.getcwd()}\\{Filename}.png is saved.')
         # [v]: Show version
         elif ans == 'v':
             print(f"Current version: {VERSION}")
@@ -1992,7 +2034,7 @@ while LOOP:
             pass
         # Any key except the listed keys: Exit the program
         else:
-            interact = False
+            INTERACT = False
             LOOP = False
             break
 
@@ -2000,4 +2042,4 @@ while LOOP:
 
 pp.close('all')
 print('Exited')
-exit(0)
+sys.exit()
