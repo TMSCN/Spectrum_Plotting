@@ -354,7 +354,7 @@ def initialize(input_json_path=None):
     global AUTOLABEL, LABEL_LIST, BLANK, COLOR_LIST, TITLE0, TITLE_FONTSIZE
     global LINEWIDTH, WAVELENGTH_DETECTED, LENGTH, FIGSIZE, ENABLE_LEGEND, FONTSIZE
     global SHOW_RUN_NUMBER, XLABEL, YLABEL, XMIN, XMAX, YMIN, YMAX, YMAX_OF_RESIDUAL
-    global X_CORR, Y_CORR, x_scale, y_scale, Y_SCALE_FACTOR_IN_UNIT
+    global X_CORR, Y_CORR, x_scale, y_scale, Y_SCALE_FACTOR_IN_UNIT, SHOW_STATISTICS
     global SCALE_FACTOR_FLUORE, X_CUT_AFTER, FIND_INTERSECTIONS, SHOW_INTERSECTIONS
     global INTERSECTION_ABS_TOL, DO_FITTING, FIT_FUNCTION, SHOW_FITTING_INFO
     global NORMALIZATION_METHOD, ENABLE_CUSTOM_INITIAL_GUESS, CUSTOM_INITIAL_GUESS
@@ -391,10 +391,12 @@ def initialize(input_json_path=None):
         print("RUN_LIST is empty. Exiting.")
         sys.exit()
 
+    CONCENTRATION_LIST = config.get("CONCENTRATION", [])
+    if not CONCENTRATION_LIST:
+        CONCENTRATION_LIST = config.get("CONCENTRATION_LIST", [1.0])
     RUN_DIR = config.get("RUN_DIR", None)
     FILENAME = config.get("FILENAME", "")
     TYPE = config.get("TYPE","")
-    CONCENTRATION_LIST = config.get("CONCENTRATION_LIST", [1.0])
     AUTOLABEL = config.get("AUTOLABEL", False)
     LABEL_LIST = config.get("LABEL_LIST", [])
     BLANK = config.get("BLANK", [])
@@ -423,14 +425,15 @@ def initialize(input_json_path=None):
     Y_SCALE_FACTOR_IN_UNIT = config.get("Y_SCALE_FACTOR_IN_UNIT", 1.0)
     SCALE_FACTOR_FLUORE = config.get("SCALE_FACTOR_FLUORE", 1e-4)
     X_CUT_AFTER = config.get("X_CUT_AFTER", None)
+    SHOW_STATISTICS = config.get("SHOW_STATISTICS", True)
 
     FIND_INTERSECTIONS = config.get("FIND_INTERSECTIONS", False)
     SHOW_INTERSECTIONS = config.get("SHOW_INTERSECTIONS", False)
-    INTERSECTION_ABS_TOL = config.get("INTERSECTION_ABS_TOL", 5e-2)
+    INTERSECTION_ABS_TOL = config.get("INTERSECTION_ABS_TOL", 1e-2)
 
     DO_FITTING = config.get("DO_FITTING", False)
     FIT_FUNCTION = config.get("FIT_FUNCTION", None)
-    SHOW_FITTING_INFO = config.get("SHOW_FITTING_INFO", True)
+    SHOW_FITTING_INFO = config.get("SHOW_FITTING_INFO", 1)
     NORMALIZATION_METHOD = config.get("NORMALIZATION_METHOD", 0)
     ENABLE_CUSTOM_INITIAL_GUESS = config.get("ENABLE_CUSTOM_INITIAL_GUESS", False)
     CUSTOM_INITIAL_GUESS = config.get("CUSTOM_INITIAL_GUESS", [])
@@ -489,6 +492,9 @@ def initialize(input_json_path=None):
     while len(y_scale) < len(RUN_LIST):
         y_scale.append(y_scale[-1])
 
+    if isinstance(CONCENTRATION_LIST, (int, float)):
+        CONCENTRATION_LIST = [CONCENTRATION_LIST]
+
     # Traverse the CONCENTRATION_LIST to check for default or negative values
     for i, c in enumerate(CONCENTRATION_LIST):
         if c == 1.0:
@@ -522,6 +528,15 @@ def initialize(input_json_path=None):
     if (XMIN or XMAX) and X_CORR and (not TO_FIND_TIME_ZERO):
         XMIN += X_CORR[0]
         XMAX += X_CORR[0]
+
+    if config.get("SHOW_ALL_STATISTICS", False):
+        SHOW_STATISTICS = True
+
+    # Convert boolean SHOW_FITTING_INFO into int
+    if isinstance(SHOW_FITTING_INFO, bool) and SHOW_FITTING_INFO:
+        SHOW_FITTING_INFO = 1
+    if isinstance(SHOW_FITTING_INFO, bool) and (not SHOW_FITTING_INFO):
+        SHOW_FITTING_INFO = 0
 
     # Decide the plot mode:
     # 0 - Most spectrum / 1 - Kinetics with fitting
@@ -1557,7 +1572,8 @@ def generate_fitting_info(_popt, _res, fit_func, perr=None, baseline_var=False, 
     info_lines.append(f"$R^2$ = {res[1]:.4f}")
     # Then print the part shown in textbox
     info_text = "\n".join(info_lines)
-    print(f"{Colors.BLUE}{info_text}{Colors.END}")
+    if SHOW_FITTING_INFO >= 0:
+        print(f"{Colors.BLUE}{info_text}{Colors.END}")
 
     # The following part is shown in console but not in textbox:
     info_lines_extra = [f"Adjusted $R^2$= {_res[2]:.4f}",
@@ -1565,8 +1581,12 @@ def generate_fitting_info(_popt, _res, fit_func, perr=None, baseline_var=False, 
                         f"RMSE = {_res[4]:.4e}",
                         f"Mean of residuals = {np.mean(_res[0]):.4e}",
                         f"Max of residuals = {np.abs(np.max(_res[0])):.4e}"]
-    info_text_extra = "\n".join(info_lines_extra) # Add this to info_text if you want
-    print(info_text_extra)
+    info_text_extra = "\n".join(info_lines_extra)
+    # Supplement this part to textbox, if SHOW_FITTING_INFO >= 2:
+    if SHOW_FITTING_INFO >= 2:
+        info_text += info_text_extra
+    if SHOW_FITTING_INFO >= 0:
+        print(info_text_extra)
 
     return info_text
 
@@ -1734,7 +1754,7 @@ while LOOP:
             # Normalization if needed
             intensity_fit, baseline, scale, snr = normalize_before_fitting(intensity_data,
                                             time_zero_index, conc=CONCENTRATION_LIST[j],
-                                                print_statistics=True, tdata=time_data)
+                                        print_statistics=SHOW_STATISTICS, tdata=time_data)
             # Pick the fitting function
             try:
                 fit_function = FIT_MODELS[FIT_FUNCTION.lower()]
@@ -1936,7 +1956,7 @@ while LOOP:
                             label='Fit (no reconv.)')
 
                 # Add fitting results into a text box on the diagram ---
-                if SHOW_FITTING_INFO:
+                if SHOW_FITTING_INFO >= 1:
                     v = 'bottom'
                     y_off = 0.07
                     if 'top' in POSITION_OF_FITTING_INFO:
